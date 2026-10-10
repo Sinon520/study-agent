@@ -1,0 +1,17 @@
+# ---- 依赖与构建产物 ----
+node_modules/
+dist/
+unpackage/
+.pnpm-store/
+
+# ---- HBuilderX 本地配置（含个人 AppID 与编译缓存） ----
+.hbuilderx/
+unpackage/
+
+# ---- 微信开发者工具本地私有配置 ----
+project.private.config.json
+
+# ---- 日志与临时文件 ----
+*.log
+.DS_Store
+Thumbs.db

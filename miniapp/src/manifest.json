@@ -1,0 +1,32 @@
+{
+  "name": "备考学习 Agent",
+  "appid": "",
+  "description": "个性化备考学习助手：今日计划、错题本、AI 问答",
+  "versionName": "1.0.0",
+  "versionCode": "100",
+  "transformPx": false,
+  "app-plus": {
+    "usingComponents": true,
+    "nvueStyleCompiler": "uni-app",
+    "compilerVersion": 3
+  },
+  "quickapp": {},
+  "mp-weixin": {
+    "appid": "",
+    "setting": {
+      "urlCheck": false,
+      "es6": true,
+      "minified": true
+    },
+    "usingComponents": true,
+    "permission": {},
+    "requiredPrivateInfos": []
+  },
+  "h5": {
+    "title": "备考学习 Agent",
+    "router": {
+      "mode": "hash"
+    }
+  },
+  "vueVersion": "3"
+}
