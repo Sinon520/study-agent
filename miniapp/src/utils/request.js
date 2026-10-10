@@ -7,19 +7,18 @@
 
 // 后端地址（全端唯一入口：chat.vue 等页面统一从这里 import，不要各写各的）。
 //
-// 当前走 **Cloudflare 快速隧道**（手机不管连 Wi-Fi 还是流量都能访问，
-// 也不受局域网拓扑和 Windows 防火墙影响；仍是 http 之外最省事的临时方案）：
-//   启动：.workbuddy/tools/cloudflared.exe tunnel --url http://127.0.0.1:8080
-//   ⚠️ 隧道进程停止后此地址失效；重启会分配**新地址**，需要同步改这里并重新构建。
+// 当前走 **局域网直连**（手机与电脑连同一个 Wi-Fi 即可）：
+//   - 为什么不是 127.0.0.1：真机/真机调试时那是手机自己的回环地址；
+//   - 本机 WLAN：192.168.1.23（Wi-Fi 名 2707_5G），Java 监听 0.0.0.0:8080；
+//   - 防火墙已确认放行本项目的 D:\jdk-21\...\java.exe（公用网络类型下生效，
+//     规则名显示为 "Node.js JavaScript Runtime" 属于系统命名误导，按程序路径判断）；
+//   - 换 Wi-Fi / DHCP 续租后 IP 可能变，IP 变了改这里一处即可。
 //
-// 备选（局域网直连，不依赖外网）：http://192.168.1.23:8080
-//   前提：手机与电脑同一 Wi-Fi + 防火墙放行本机 java.exe。
-//   本机实测"java 的放行规则"只覆盖了 IDE 自带的 JRE，没覆盖我们用的
-//   D:\jdk-21\...\java.exe —— 需管理员执行一次：
-//   netsh advfirewall firewall add rule name="study-agent 8080" dir=in action=allow protocol=TCP localport=8080
+// 备选：Cloudflare 快速隧道（手机连什么网络都行，但依赖外网、地址每次重启会变）：
+//   .workbuddy/tools/cloudflared.exe tunnel --url http://127.0.0.1:8080
 //
 // 上线前：换成自有的 https 域名并在小程序后台配置 request 合法域名。
-export const BASE_URL = 'https://shared-zealand-homework-sticks.trycloudflare.com'
+export const BASE_URL = 'http://192.168.1.23:8080'
 
 const ACCESS_KEY = 'sa_access_token'
 const REFRESH_KEY = 'sa_refresh_token'
