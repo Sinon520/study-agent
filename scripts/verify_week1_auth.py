@@ -21,12 +21,22 @@
 from __future__ import annotations
 
 import argparse
+import pathlib
 import json
 import random
 import string
 import sys
 import urllib.error
 import urllib.request
+
+# Windows 控制台默认 GBK：接口返回的原文里常带数学符号（∫₀¹ 的下标 ₀ 等），
+# print 会抛 UnicodeEncodeError 并**直接中断整个验收脚本**，表现成"跑到一半突然退出"。
+# 这里在任何输出之前把 stdout/stderr 切成 UTF-8 + errors=replace。
+# 详见 docs/踩坑记录.md 与 scripts/_console.py。
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _console import enable_utf8_output  # noqa: E402
+
+enable_utf8_output()
 
 PASS = 0
 FAIL = 0

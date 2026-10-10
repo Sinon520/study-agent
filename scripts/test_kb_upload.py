@@ -12,12 +12,22 @@
 from __future__ import annotations
 
 import argparse
+import pathlib
 import json
 import sys
 import time
 import urllib.error
 import urllib.request
 import uuid
+
+# Windows 控制台默认 GBK：接口返回的原文里常带数学符号（∫₀¹ 的下标 ₀ 等），
+# print 会抛 UnicodeEncodeError 并**直接中断整个验收脚本**，表现成"跑到一半突然退出"。
+# 这里在任何输出之前把 stdout/stderr 切成 UTF-8 + errors=replace。
+# 详见 docs/踩坑记录.md 与 scripts/_console.py。
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _console import enable_utf8_output  # noqa: E402
+
+enable_utf8_output()
 
 PASS = 0
 FAIL = 0
@@ -134,19 +144,25 @@ def main() -> int:
 
     document_id = doc.get("id")
 
-    # 轮询状态：解析是异步的，等它落到「完成」或「失败」
+    # 轮询状态：解析是异步的，等它落到「完成」或「失败」。
+    #
+    # 超时给 600 秒而不是 180 秒：解析任务在 Java 的线程池里排队，
+    # 而每个任务要同步等 Python 跑完 BGE-M3 向量化（首次还要加载 2.2GB 模型）。
+    # 实测池子偏小时一条任务排到 267 秒 —— 那是**服务端的问题**
+    # （已把池子 2 → 4 并加了排队告警），但验收脚本也不该用一个刚好卡在
+    # 边界上的超时，否则会把"服务端慢"误报成"状态卡住不落定"。
     final = None
     if document_id:
-        deadline = time.time() + 180
+        deadline = time.time() + 600
         while time.time() < deadline:
             status, body, _ = request(base, "GET", f"/kb/{document_id}", token=token)
             d = (body or {}).get("data") or {}
             if d.get("parseStatus") in ("完成", "失败"):
                 final = d
                 break
-            time.sleep(4)
+            time.sleep(5)
 
-    check(final is not None, "解析状态在 180 秒内落定为「完成」或「失败」（不会一直卡在解析中）",
+    check(final is not None, "解析状态在 600 秒内落定为「完成」或「失败」（不会一直卡在解析中）",
           f"最终状态={final.get('parseStatus') if final else '超时'}")
 
     if final:

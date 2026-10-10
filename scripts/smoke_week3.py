@@ -9,11 +9,21 @@
 from __future__ import annotations
 
 import argparse
+import pathlib
 import datetime as dt
 import json
 import sys
 import urllib.error
 import urllib.request
+
+# Windows 控制台默认 GBK：接口返回的原文里常带数学符号（∫₀¹ 的下标 ₀ 等），
+# print 会抛 UnicodeEncodeError 并**直接中断整个验收脚本**，表现成"跑到一半突然退出"。
+# 这里在任何输出之前把 stdout/stderr 切成 UTF-8 + errors=replace。
+# 详见 docs/踩坑记录.md 与 scripts/_console.py。
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _console import enable_utf8_output  # noqa: E402
+
+enable_utf8_output()
 
 PASS = 0
 FAIL = 0
@@ -157,6 +167,39 @@ def main() -> int:
             check(status == 200 or status == 500, "问答接口未就绪时返回可控错误", f"status={status}")
             check("模型" in str(msg) or "AI 服务" in str(msg),
                   "错误提示指向模型/服务状态而非「服务器内部错误」", f"msg={str(msg)[:140]}")
+
+    # ---------------------------------------------------------- AI 生成计划
+    print()
+    print("--- F. AI 生成计划（/plan/agent-generate，用户入口）---")
+    status, _, _ = call(java, "POST", "/plan/agent-generate",
+                        {"examType": "考研", "targetDate": "2026-12-20", "dailyMinutes": 120})
+    check(status == 401, "未登录访问 /plan/agent-generate → 401", f"status={status}")
+
+    if jwt:
+        # Agent 生成是"真 LLM 干活"：20 天的计划要跑 1~3 次大模型调用，
+        # 首次还会触发本地 BGE-M3 加载，实测数分钟级。所以这里超时给足 10 分钟。
+        status, body, raw = call(java, "POST", "/plan/agent-generate",
+                                 {"examType": "考研", "targetDate": "2026-12-20",
+                                  "dailyMinutes": 120, "subjects": "英语,政治"},
+                                 token=jwt, timeout=600)
+        if status == 200 and (body or {}).get("code") == 200:
+            data = (body or {}).get("data") or {}
+            check(True, "Agent 生成计划成功并落库",
+                  f"planId={data.get('planId')} 任务数={data.get('savedTasks')} "
+                  f"天数={data.get('days')} 重试={data.get('retries')}")
+            check(data.get("planId") is not None, "返回落库后的 planId")
+            # 落库后应能在计划列表里查到，且 source 是 Agent生成
+            status, body, _ = call(java, "GET", f"/plan/{data.get('planId')}", token=jwt)
+            plan = (body or {}).get("data") or {}
+            check(plan.get("source") == "Agent生成", "计划 source 标记为「Agent生成」",
+                  f"source={plan.get('source')}")
+        elif status == -1:
+            check(False, "Agent 生成在 10 分钟内返回（未超时）", f"raw={str(raw)[:160]}")
+        else:
+            msg = (body or {}).get("msg") if isinstance(body, dict) else raw
+            check("模型" in str(msg) or "AI 服务" in str(msg) or "大模型" in str(msg),
+                  "生成失败时提示指向模型/服务状态（不是裸的服务器内部错误）",
+                  f"status={status} msg={str(msg)[:160]}")
 
     # ---------------------------------------------------------- 汇总
     total = PASS + FAIL
