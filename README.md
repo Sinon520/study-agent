@@ -179,7 +179,7 @@ cd server-ai
 | [表设计.md](docs/表设计.md)         | 13 张表结构、ER 图、索引设计与依据                                                     |
 | [架构.md](docs/架构.md)           | 双栈拆分理由、模块职责、traceId 四段式贯穿、可替换点                                           |
 | [环境说明.md](docs/环境说明.md)       | 本机中间件与工具链、端口、常见问题                                                        |
-| [踩坑记录.md](docs/踩坑记录.md)       | 24 条真实踩过的坑（模型下载挂死/换 ModelScope、向量相似度误判、**双写竞态**、长计划超时/分片生成、小程序 SSE 静默丢数据、**Vue3 改原始对象不渲染**、LangChain 丢 reasoning_content、Excel 运行时炸、Bean 循环依赖等） |
+| [踩坑记录.md](docs/踩坑记录.md)       | 25 条真实踩过的坑（模型下载挂死/换 ModelScope、向量相似度误判、**双写竞态**、长计划超时/分片生成、小程序 SSE 静默丢数据、**Vue3 改原始对象不渲染**、**FastAPI async 端点跑阻塞调用冻住全服务**、LangChain 丢 reasoning_content、Excel 运行时炸、Bean 循环依赖等） |
 | [第1周验收报告.md](docs/第1周验收报告.md) | 地基周验收：40 项自动化检查                                                          |
 | [第2周验收报告.md](docs/第2周验收报告.md) | 业务闭环周验收：74 项自动化检查                                                        |
 | [第3周验收报告.md](docs/第3周验收报告.md) | AI 能力层验收：RAG 端到端 31 项 + 联调加固 32 项                                           |
@@ -195,6 +195,7 @@ python scripts/verify_week3_rag.py        # RAG 端到端（上传→入库→�
 python scripts/verify_week3_hardening.py  # 并发 / 断连 / 长文档 / 空检索，32 项
 python scripts/smoke_week3.py             # 内部接口安全 / Agent 落库 / 问答降级路径
 python scripts/smoke_week4_mq.py          # RocketMQ 收发环回 + 错题异步归类端到端
+python scripts/verify_week4_report.py     # 复盘报告链路（生成/幂等/通知/越权），29 项
 python scripts/test_kb_upload.py          # 资料上传边界（非法类型 / 越权 / 失败态可读）
 ```
 
