@@ -139,6 +139,16 @@ app:
   upload-dir: ./uploads
   python-base-url: http://127.0.0.1:8000
 
+# ==================== 内部接口（Python 回调） ====================
+# Python 侧需要写库时一律回调 Java 的 /internal/**（保持单一写入口）。
+# 这些接口不走 JWT，由 InternalTokenFilter 校验共享令牌 + 来源 IP。
+# token 必须与 server-ai 的 INTERNAL_TOKEN 一致，生产用环境变量注入。
+internal:
+  token: ${INTERNAL_TOKEN:study-agent-internal}
+  python-base-url: ${PYTHON_BASE_URL:http://127.0.0.1:8000}
+  # 首次解析会触发本地 BGE-M3 加载（CPU 上可能几十秒），读超时必须放宽
+  python-timeout-seconds: 600
+
 # ==================== Knife4j / springdoc ====================
 springdoc:
   api-docs:

@@ -1,5 +1,6 @@
 package com.studyagent.config;
 
+import com.studyagent.security.InternalTokenFilter;
 import com.studyagent.security.JwtAuthenticationFilter;
 import com.studyagent.security.RestAuthenticationEntryPoint;
 import lombok.RequiredArgsConstructor;
@@ -20,7 +21,8 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
  * Spring Security 配置。
  *
  * <p>过滤器链顺序：{@code TraceIdFilter}（Servlet 层，优先级最高，先生成 traceId）
- * → {@code SecurityFilterChain}（内含 {@link JwtAuthenticationFilter}）→ Controller。</p>
+ * → {@code SecurityFilterChain}（内含 {@link InternalTokenFilter} 与
+ * {@link JwtAuthenticationFilter}）→ Controller。</p>
  */
 @Configuration
 @EnableWebSecurity
@@ -29,14 +31,26 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
 public class SecurityConfig {
 
     private final JwtAuthenticationFilter jwtAuthenticationFilter;
+    private final InternalTokenFilter internalTokenFilter;
     private final RestAuthenticationEntryPoint restAuthenticationEntryPoint;
 
     /**
      * 白名单：这些路径无需认证。
      * <p>{@code /error} 必须放行，否则全局异常处理的结果会被 401 掩盖。</p>
+     *
+     * <p>{@code /internal/**} 也在白名单里，但**不是裸奔**：
+     * 它由 {@link InternalTokenFilter} 单独校验共享令牌 + 来源 IP。
+     * 之所以不放进 Spring Security 的认证体系，是因为调用方是 Python 服务，
+     * 它没有用户 JWT，硬套 JWT 只会让两边都变复杂。</p>
      */
     public static final String[] WHITE_LIST = {
             "/auth/**",
+            "/internal/**",
+            // 挂在业务命名空间下的内部接口：调用方是 Python 规划 Agent（无用户 JWT），
+            // 由 InternalTokenFilter 校验 X-Internal-Token + 来源 IP。
+            // 注意必须在这里放行 Spring Security，否则会被 JWT 链路直接 401 拦掉，
+            // 根本走不到 InternalTokenFilter（过滤器在授权判断之前，但授权失败会先返回）。
+            "/plan/agent-create",
             "/health",
             "/error",
             "/swagger-ui/**",
@@ -70,6 +84,8 @@ public class SecurityConfig {
                         .requestMatchers(WHITE_LIST).permitAll()
                         .anyRequest().authenticated()
                 )
+                // 内部接口令牌校验要排在 JWT 之前：内部调用本来就没有 JWT
+                .addFilterBefore(internalTokenFilter, UsernamePasswordAuthenticationFilter.class)
                 // JWT 过滤器插在用户名密码认证过滤器之前
                 .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class);
 
