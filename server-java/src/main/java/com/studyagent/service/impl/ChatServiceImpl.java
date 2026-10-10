@@ -143,11 +143,21 @@ public class ChatServiceImpl implements ChatService {
         }
 
         // 6) 落 assistant 消息
+        //
+        // 本项目约定：SSE 问答链路的落库由 Java **独占**完成 —— user 消息在开流前写、
+        // assistant 消息在流结束后写（连接中断时也保留已生成的部分内容）。
+        // 历史踩坑：Python 侧曾在发 [DONE] 之前调用 /internal/chat/messages 也写一遍，
+        // 而这里的保存没有幂等守卫、且总在对方插入之后执行 —— 结果每条 assistant
+        // 消息都存了两份（同秒、内容完全相同）。"同 session 同 role 同内容不重复插"
+        // 挡不住这种竞态（两边都在对方插入前完成了存在性检查），根治靠写入口唯一化。
+        // 详见 server-ai/app/routers/rag.py 的说明与 docs/踩坑记录.md。
         String answerText = answer.toString();
+        boolean assistantSaved = false;
         if (StringUtils.hasText(answerText) || StringUtils.hasText(reasoning.toString())) {
             saveMessage(session, userId, "assistant", answerText, reasoning.toString(), citationsJson);
+            assistantSaved = true;
         }
-        chatSessionService.updateById(buildSessionPatch(session, answerText));
+        chatSessionService.updateById(buildSessionPatch(session, answerText, assistantSaved));
 
         log.info("问答完成 userId={} sessionId={} 回答 {} 字 思考 {} 字 引用={} 耗时={}ms",
                 userId, session.getId(), answerText.length(), reasoning.length(),
@@ -181,10 +191,12 @@ public class ChatServiceImpl implements ChatService {
         return session;
     }
 
-    private ChatSession buildSessionPatch(ChatSession session, String answer) {
+    private ChatSession buildSessionPatch(ChatSession session, String answer, boolean assistantSaved) {
         ChatSession patch = new ChatSession();
         patch.setId(session.getId());
-        patch.setMessageCount((session.getMessageCount() == null ? 0 : session.getMessageCount()) + 2);
+        // 按本轮实际写入的消息行数累加：user 必写 1 条；assistant 全空（生成彻底失败）时不写行
+        patch.setMessageCount((session.getMessageCount() == null ? 0 : session.getMessageCount())
+                + (assistantSaved ? 2 : 1));
         patch.setLastTime(LocalDateTime.now());
         // 首轮问答结束后用问题做标题（如果标题还是默认值）
         if ("新会话".equals(session.getTitle()) && StringUtils.hasText(answer)) {

@@ -123,9 +123,14 @@ class JavaClient:
     # ------------------------------------------------------------- 问答落库
 
     def save_chat_messages(self, payload: dict) -> Any:
-        """把一轮问答（user + assistant 两条）落库。
+        """把一轮问答（user + assistant 两条）补写落库（内部接口，自带幂等保护）。
 
-        payload: `{userId, sessionId, question, answer, reasoning, citations, tokenCount}`
+        payload: `{userId, sessionId, question, answer, reasoning, citations}`
+
+        注意：**当前 SSE 问答链路不再调用它** —— 落库已由 Java 透传时独占完成
+        （连接中断也能保存部分内容），Python 重复参与写库会造成双写竞态
+        （实测每条 assistant 存两份）。保留下层方法供未来的非 SSE 场景
+        （补偿任务、批量导入等）使用，详见 docs/踩坑记录.md。
         """
         return self._request("POST", "/internal/chat/messages", payload)
 

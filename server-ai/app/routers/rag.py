@@ -233,11 +233,19 @@ async def chat(request: ChatRequest) -> StreamingResponse:
 
 
 async def _sse_stream(request: ChatRequest, context) -> AsyncIterator[str]:
-    """SSE 生成器：按协议吐帧，并把整轮问答落库。"""
+    """SSE 生成器：按协议吐帧。
+
+    <h3>这里只吐帧，不落库</h3>
+    整轮问答的落库由 **Java 独占完成**：user 消息在开流前写、assistant 消息
+    在透传结束后写（连接中断时也会保存已生成的部分内容），会话计数由 Java 维护。
+
+    历史踩坑：Python 侧曾在发 [DONE] 之前调用 ``/internal/chat/messages`` 也写一遍，
+    而 Java 的保存没有幂等守卫、且总在这之后执行 —— 结果每条 assistant 消息都被
+    存了两份（同一秒、内容完全相同）。"同 session 同 role 同内容不重复插"这样的
+    幂等检查挡不住这种竞态：两边都在对方插入之前完成了查询。根治办法只有一个：
+    **写入口唯一化**。详见 docs/踩坑记录.md 与 ChatServiceImpl 中的说明。
+    """
     citation_list = [c.to_citation() for c in context.chunks]
-    answer_parts: list[str] = []
-    reasoning_parts: list[str] = []
-    failed = False
 
     yield _frame(
         "start",
@@ -252,25 +260,18 @@ async def _sse_stream(request: ChatRequest, context) -> AsyncIterator[str]:
     try:
         async for piece in stream_answer(context):
             if piece["type"] == "reasoning":
-                reasoning_parts.append(piece["text"])
                 yield _frame("reasoning", {"text": piece["text"]})
             else:
-                answer_parts.append(piece["text"])
                 yield _frame("message", {"text": piece["text"]})
     except BizException as exc:
-        failed = True
         logger.error("RAG 生成失败: code={} msg={}", exc.code, exc.msg)
         yield _frame("error", {"code": exc.code, "message": exc.msg})
     except Exception as exc:  # noqa: BLE001
-        failed = True
         logger.exception("RAG 生成未预期异常: {!r}", exc)
         yield _frame("error", {"code": 5000, "message": f"生成失败：{type(exc).__name__}"})
 
     # 引用帧：即使生成失败也发，便于排查"检索到了什么"
     yield _frame("citations", citation_list)
-
-    # 落库：失败也落（前端能看到半截回答与它引用了什么，比丢掉更有用）
-    _persist(request, "".join(answer_parts), "".join(reasoning_parts), citation_list, failed)
 
     yield "data: [DONE]\n\n"
 
@@ -279,33 +280,6 @@ def _frame(event: str, data) -> str:
     """拼一个 SSE 帧。"""
     payload = json.dumps(data, ensure_ascii=False)
     return f"event: {event}\ndata: {payload}\n\n"
-
-
-def _persist(
-    request: ChatRequest,
-    answer: str,
-    reasoning: str,
-    citations: list[dict],
-    failed: bool,
-) -> None:
-    """把本轮问答写入 chat_message（通过 Java，保持单一写入口）。
-
-    落库失败只告警：用户已经看到回答了，不能因为持久化失败让体验变差。
-    """
-    try:
-        get_java_client().save_chat_messages(
-            {
-                "userId": request.user_id,
-                "sessionId": request.session_id,
-                "question": request.question,
-                "answer": answer,
-                "reasoning": reasoning,
-                "citations": citations,
-                "failed": failed,
-            }
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("问答落库失败（不影响本次回答）: {!r}", exc)
 
 
 __all__ = ["router"]

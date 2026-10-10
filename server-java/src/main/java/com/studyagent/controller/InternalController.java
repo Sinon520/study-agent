@@ -133,14 +133,21 @@ public class InternalController {
     // ------------------------------------------------------------------ 问答
 
     /**
-     * 保存一轮问答消息。
+     * 保存一轮问答消息（幂等补写入口）。
      *
-     * <p>Python 在 SSE 结束后调用。注意这里同时更新会话的消息数与最后时间，
-     * 否则会话列表的排序与条数会一直是 0。</p>
+     * <p><b>当前 SSE 问答链路不调用本接口</b>：落库已由 {@code ChatServiceImpl.askStream}
+     * 独占完成（Java 透传时既写 user 消息，也写含 citations 的 assistant 消息，
+     * 连接中断时保存部分内容）。Python 曾在流结束前调用这里"先写一遍"，
+     * 与 Java 的写入形成竞态 —— 下方的 {@link #saveIfAbsent} 会赢不了
+     * "两边同时查、都没查到、于是都插"的时序，导致每条 assistant 存两份。
+     * 因此本接口保留为**非 SSE 场景**（补偿任务、批量导入）的补写入口，
+     * 自带同角色同内容的幂等保护。</p>
+     *
+     * <p>注意这里同时更新会话的消息数与最后时间，否则会话列表的排序与条数会一直是 0。</p>
      */
     @PostMapping("/chat/messages")
     @Transactional(rollbackFor = Exception.class)
-    @Operation(summary = "保存一轮问答消息", description = "Python 在生成结束后调用，落 user + assistant 两条")
+    @Operation(summary = "保存一轮问答消息（幂等补写）", description = "非 SSE 场景的补写入口；SSE 链路由 Java 透传时独占落库")
     public Result<Long> saveChatMessages(@RequestBody Map<String, Object> payload) {
         Long userId = asLong(payload.get("userId"));
         Long sessionId = asLong(payload.get("sessionId"));
@@ -156,10 +163,9 @@ public class InternalController {
             throw new BizException(Result.CODE_FORBIDDEN, "会话与用户不匹配，拒绝写入");
         }
 
-        // 先删掉本轮可能已由 Java 侧写入的消息？不做：
-        // Java 透传时已经落过一遍，这里只补 Python 独有的字段（如 failed 标记）。
-        // 因此本接口设计为"补写"，调用方（Python）只在 Java 未落库时才该调用它。
-        // 当前链路里 Java 已经落库，所以这里默认是幂等保护：同 session 同 role 同内容不重复插。
+        // 幂等保护：同 session 同 role 同内容不重复插。
+        // 注意它的适用边界 —— 只对"单一调用方"有效；如果两个写入方并发进入，
+        // 双方的存在性检查都可能在对方插入前通过，幂等就失效了（项目实际踩过）。
         int saved = 0;
         saved += saveIfAbsent(session, userId, "user", asString(payload.get("question")), null, null);
         saved += saveIfAbsent(session, userId, "assistant", asString(payload.get("answer")),
