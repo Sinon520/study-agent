@@ -9,8 +9,13 @@
   而不是多轮对话追问 —— 对应执行计划降级预案第 4 条（砍掉多轮补全）。
   需要多轮时，把 `missing_fields` 返回给前端做追问即可，图结构不用改。
 - **节点2（计划生成）**：用 `response_format={"type": "json_object"}` 约束 LLM 输出结构化 JSON。
+  长计划（> {@link CHUNK_DAYS} 天）按 10 天**分片并发生成后合并** —— 单次全量输出
+  会超时，原因见 `CHUNK_DAYS` 的注释。
 - **节点3（校验调整）**：校验 JSON 合法性、日期连续性、每日时长的合理性；
   不合法就带着**具体错误原因**回到节点2重试（错误信息进 prompt，让模型自我修正）。
+  **可确定性修复的问题不触发重试**（每日时长超出上限 → 削减任务时长；
+  任务条数超限 → 移除多余条目），修正动作记入 warnings ——
+  把"重生成整段（分钟级）"降级为"毫秒级修正"。
 
 为什么要自己校验而不是信任模型：LLM 会产出"日期跳了一天""某天 8 小时""科目写错"
 这类问题。校验器把这些问题变成可重试的反馈，比前端硬判更可靠。
@@ -20,6 +25,7 @@ from __future__ import annotations
 
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from typing import Any, TypedDict
 
@@ -34,6 +40,20 @@ MAX_DAYS = 400
 MAX_RETRIES = 2
 #: 每天最多多少条任务（超过说明模型在凑数）
 MAX_TASKS_PER_DAY = 6
+#: 分片天数：单次 LLM 调用最多生成这么多天的任务。
+#:
+#: 为什么要分片（实测踩坑）：最初整段计划一次生成，72 天的任务 JSON 输出量太大
+#: （约 15K~30K 字符，还要叠加思考模式的思维链），qwen3.7-flash 单次生成远超
+#: 60 秒的客户端超时 —— 连续 3 次尝试都在 60 秒处被掐断（日志：OpenAITimeoutError），
+#: 对外表现成"AI 没有生成任何任务"。按 10 天分片后，单次输出降到 2K~4K 字符，
+#: 10~30 秒即可完成；片段之间互不依赖，用线程池并发跑，
+#: 72 天计划的总耗时压到 1 分钟级。
+CHUNK_DAYS = 10
+#: 分片并发的最大线程数（DashScope 单 key 的并发额度足够 8 路）
+CHUNK_WORKERS = 8
+#: 单个分片的生成尝试次数（JSON 解析失败 / 超时都值得原地再来一次，
+#: 比"整个计划重生成"便宜得多：单分片约 1 分钟，整段约 2~6 分钟）
+SEGMENT_ATTEMPTS = 2
 
 
 # --------------------------------------------------------------------- 状态
@@ -155,7 +175,11 @@ def _default_subjects(exam_type: str) -> list[str]:
 def node_generate_plan(state: PlanState) -> dict:
     """节点2：LLM 产出结构化 JSON 计划。
 
-    `feedback` 非空时表示上一轮校验失败，把错误原因一起交给模型自我修正。
+    长计划（超过 {@link CHUNK_DAYS} 天）按片切分、**并发**调用 LLM，再按日期合并 ——
+    单次全量生成会因输出过长而超时，原因见 {@link CHUNK_DAYS} 的注释。
+
+    `feedback` 非空时表示上一轮校验失败，把错误原因一起交给模型自我修正
+    （每个分片都会带上完整的反馈列表，让对应日期所在的片段自我修复）。
     """
     normalized = state.get("normalized") or {}
     if not normalized:
@@ -164,31 +188,123 @@ def node_generate_plan(state: PlanState) -> dict:
     retries = int(state.get("retries") or 0)
     feedback = state.get("feedback") or []
 
-    prompt = _build_generate_prompt(normalized, feedback)
+    start: date = normalized.get("startDate") or date.today()
+    days = int(normalized.get("days") or 1)
+    segments = _split_segments(start, days)
+    multi = len(segments) > 1
+
     logger.info(
-        "规划 Agent 节点2：生成计划（第 {} 次尝试）| 天数={} 每日={} 分钟 科目={}",
+        "规划 Agent 节点2：生成计划（第 {} 次尝试）| 天数={} 每日={} 分钟 科目={} | 分 {} 片{}",
         retries + 1,
-        normalized.get("days"),
+        days,
         normalized.get("dailyMinutes"),
         "、".join(normalized.get("subjects") or []),
+        len(segments),
+        "（并发生成）" if multi else "",
     )
 
-    try:
-        llm = get_llm(streaming=False, temperature=0.2)
-        message = llm.invoke(prompt)
-        text = _extract_text(message)
-        raw_plan = _parse_json(text)
-    except BizException:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        logger.error("规划 Agent 节点2 失败: {!r}", exc)
-        return {"raw_plan": {}, "errors": [f"计划生成失败：{exc!r}"]}
+    results: dict[int, tuple[str, list[dict]]] = {}
+    failures: list[str] = []
 
-    return {"raw_plan": raw_plan}
+    def _run(index: int) -> None:
+        segment = segments[index] if multi else None
+        last_exc: Exception | None = None
+        for attempt in range(1, SEGMENT_ATTEMPTS + 1):
+            try:
+                results[index] = _invoke_segment(normalized, segment, feedback)
+                return
+            except Exception as exc:  # noqa: BLE001 - 单个分片失败不丢弃其它分片
+                last_exc = exc
+                logger.warning(
+                    "规划 Agent 节点2 分片 [{}] 第 {}/{} 次失败: {!r}",
+                    _describe_segment(segments[index]),
+                    attempt,
+                    SEGMENT_ATTEMPTS,
+                    exc,
+                )
+        failures.append(f"{_describe_segment(segments[index])}：{last_exc!r}")
+
+    if not multi:
+        _run(0)
+    else:
+        with ThreadPoolExecutor(max_workers=min(CHUNK_WORKERS, len(segments))) as pool:
+            list(pool.map(_run, range(len(segments))))
+
+    if not results:
+        return {"raw_plan": {}, "errors": ["计划生成失败：" + "；".join(failures[:3])]}
+
+    if failures:
+        # 缺的日期会由校验节点报出来并触发重试；这里先把警告记清楚的
+        logger.warning(
+            "规划 Agent 节点2：{} 个分片失败，缺失日期将由校验节点报出 | {}",
+            len(failures),
+            "；".join(failures[:3]),
+        )
+
+    merged: list[dict] = []
+    title = ""
+    for index in sorted(results):
+        seg_title, tasks = results[index]
+        if not title and seg_title:
+            title = seg_title
+        merged.extend(tasks)
+    merged.sort(key=lambda item: str(item.get("taskDate") or ""))
+    return {"raw_plan": {"title": title, "tasks": merged}}
 
 
-def _build_generate_prompt(normalized: dict, feedback: list[str]) -> str:
-    """拼生成计划的 prompt。"""
+def _invoke_segment(
+    normalized: dict, segment: tuple[date, date, int, int] | None, feedback: list[str]
+) -> tuple[str, list[dict]]:
+    """调用一次 LLM 生成（整段或某一个分片）并解析 JSON。
+
+    Returns:
+        `(title, tasks)` —— tasks 为模型返回的原始 dict 列表，清洗在校验节点做。
+    """
+    prompt = _build_generate_prompt(normalized, feedback, segment)
+    # 分片后单次输出小、耗时可预期，超时放宽到 120s；同时把 HTTP 层重试降到 1 次，
+    # 避免单分片在"客户端超时"上浪费 3 倍时间（整体失败由图级重试兜底）
+    llm = get_llm(streaming=False, temperature=0.2, timeout=120, max_retries=1)
+    # 用 response_format 约束模型只输出 JSON 对象。实测不开它时，个别分片会产出
+    # "看起来像 JSON、实际解析失败"的文本（长度 3.9K~5.8K），只能靠图级重试补救，
+    # 代价是整段计划重新生成。DashScope 的 OpenAI 兼容协议支持这个参数。
+    message = llm.bind(response_format={"type": "json_object"}).invoke(prompt)
+    text = _extract_text(message)
+    raw = _parse_json(text)
+    tasks = raw.get("tasks")
+    if not isinstance(tasks, list) or not tasks:
+        # 抛出去交给分片级重试（_run），而不是静默返回空 tasks
+        raise ValueError(f"模型输出不是含 tasks 的 JSON（长度 {len(text)}）")
+    return str(raw.get("title") or ""), [t for t in tasks if isinstance(t, dict)]
+
+
+def _split_segments(start: date, days: int) -> list[tuple[date, date, int, int]]:
+    """把 [start, start + days - 1] 切成连续、不重叠、最多 CHUNK_DAYS 天的片段。
+
+    Returns:
+        `[(片段起始日, 片段结束日, 第几天起(1-based), 第几天止), ...]`
+    """
+    segments: list[tuple[date, date, int, int]] = []
+    offset = 0
+    while offset < days:
+        size = min(CHUNK_DAYS, days - offset)
+        seg_start = start + timedelta(days=offset)
+        seg_end = seg_start + timedelta(days=size - 1)
+        segments.append((seg_start, seg_end, offset + 1, offset + size))
+        offset += size
+    return segments
+
+
+def _describe_segment(segment: tuple[date, date, int, int]) -> str:
+    """人类可读的片段描述（日志 / 错误信息用）。"""
+    return f"{segment[0]} ~ {segment[1]}（第 {segment[2]}~{segment[3]} 天）"
+
+
+def _build_generate_prompt(
+    normalized: dict,
+    feedback: list[str],
+    segment: tuple[date, date, int, int] | None = None,
+) -> str:
+    """拼生成计划的 prompt（segment 非空时表示只生成该分片）。"""
     subjects = "、".join(normalized.get("subjects") or [])
     days = normalized.get("days")
     daily = normalized.get("dailyMinutes")
@@ -197,6 +313,12 @@ def _build_generate_prompt(normalized: dict, feedback: list[str]) -> str:
     exam_type = normalized.get("examType")
     level = normalized.get("level")
     title = normalized.get("title") or f"{days} 天{exam_type}冲刺计划"
+
+    # 本次要覆盖的日期范围：分片时只覆盖片段，否则覆盖全时段
+    if segment is not None:
+        span = f"{segment[0]} 到 {segment[1]}"
+    else:
+        span = f"{start} 到 {target}"
 
     parts = [
         "你是一位备考规划专家。请为下面这位学生生成逐日学习计划。",
@@ -209,26 +331,44 @@ def _build_generate_prompt(normalized: dict, feedback: list[str]) -> str:
         f"- 总天数：{days} 天（含今天与考试当天）",
         f"- 每日可投入：{daily} 分钟",
         f"- 需要覆盖的科目：{subjects}",
-        "",
-        "【要求】",
-        f"1. 从 {start} 到 {target} **每一天**都要有任务，日期必须连续、不能跳日、不能超出范围；",
-        f"2. 每天所有任务的预计时长之和必须 ≤ {daily} 分钟，且不低于 {max(10, daily // 2)} 分钟；",
-        f"3. 每天任务条数在 1~{MAX_TASKS_PER_DAY} 条之间；",
-        "4. 科目要交替安排，同一科目不要连续太多天只做同一件事；",
-        "5. 越接近考试，越偏向真题模考与查漏补缺；越靠前越偏向基础与知识框架；",
-        "6. 任务标题要具体可执行（例如「背 100 个考研核心词 + 精读 1 篇真题阅读」），",
-        "   不要写「学习英语」这种空泛描述；",
-        "7. 只输出 JSON，不要输出任何解释文字、不要用 markdown 代码块包裹。",
-        "",
-        "【输出 JSON 结构】",
-        "{",
-        '  "title": "计划标题",',
-        '  "tasks": [',
-        '    {"taskDate": "yyyy-MM-dd", "title": "任务标题", "content": "具体要求", '
-        '"subject": "科目", "estimatedMinutes": 60}',
-        "  ]",
-        "}",
     ]
+
+    if segment is not None:
+        parts.extend(
+            [
+                "",
+                "【本次生成范围（重要）】",
+                f"这是一份 {days} 天计划里的第 {segment[2]} ~ {segment[3]} 天部分"
+                f"（{segment[0]} ~ {segment[1]}，共 {segment[3] - segment[2] + 1} 天）。",
+                "计划的其它日期由别的生成任务负责，**你只生成这个范围内的日期**，"
+                "不要生成范围之外的日期，也不要漏掉范围内的任何一天。",
+            ]
+        )
+
+    parts.extend(
+        [
+            "",
+            "【要求】",
+            f"1. 从 {span} **每一天**都要有任务，日期必须连续、不能跳日、不能超出范围；",
+            f"2. 每天所有任务的预计时长之和必须 ≤ {daily} 分钟，且不低于 {max(10, daily // 2)} 分钟；",
+            f"3. 每天任务条数在 1~{MAX_TASKS_PER_DAY} 条之间；",
+            "4. 科目要交替安排，同一科目不要连续太多天只做同一件事；",
+            f"5. subject 字段**只能填**以下科目名之一（严格照抄，不要写「综合」「混合」这类新名字）：{subjects}；",
+            "6. 越接近考试，越偏向真题模考与查漏补缺；越靠前越偏向基础与知识框架；",
+            "7. 任务标题要具体可执行（例如「背 100 个考研核心词 + 精读 1 篇真题阅读」），",
+            "   不要写「学习英语」这种空泛描述；",
+            "8. 只输出 JSON，不要输出任何解释文字、不要用 markdown 代码块包裹。",
+            "",
+            "【输出 JSON 结构】",
+            "{",
+            '  "title": "计划标题",',
+            '  "tasks": [',
+            '    {"taskDate": "yyyy-MM-dd", "title": "任务标题", "content": "具体要求", '
+            '"subject": "科目", "estimatedMinutes": 60}',
+            "  ]",
+            "}",
+        ]
+    )
 
     if feedback:
         parts.extend(
@@ -288,7 +428,12 @@ def _parse_json(text: str) -> dict:
         except json.JSONDecodeError:
             continue
 
-    logger.warning("规划 Agent 无法从模型输出中解析出 JSON，长度={}", len(text))
+    logger.warning(
+        "规划 Agent 无法从模型输出中解析出 JSON，长度={} | 开头={!r} | 结尾={!r}",
+        len(text),
+        text[:160],
+        text[-120:],
+    )
     return {}
 
 
@@ -384,24 +529,44 @@ def node_validate_plan(state: PlanState) -> dict:
         suffix = f" 等 {len(missing_dates)} 天" if len(missing_dates) > 5 else ""
         errors.append(f"以下日期没有任务：{preview}{suffix}（要求每一天都有任务）")
 
-    # ---- 每日时长合理性 ----
+    # ---- 每日时长 / 条数：确定性修正 ----
+    #
+    # 这两类问题完全可以由代码修好（削减最后一条任务的时长 / 移除多余条目），
+    # 没必要带着它们回节点2 重生成整段计划 —— 实测一次整段重生成要 2 分钟以上，
+    # 而这里的修正是毫秒级。修正动作记进 warnings，前端可以展示"已自动校正"。
+    by_day: dict[str, list[dict]] = {}
+    for task in cleaned:
+        by_day.setdefault(task["taskDate"], []).append(task)
+
+    for day in sorted(by_day):
+        day_tasks = by_day[day]
+        total = sum(t["estimatedMinutes"] for t in day_tasks)
+        while total > daily_minutes and day_tasks:
+            last = day_tasks[-1]
+            cut = min(last["estimatedMinutes"] - 10, total - daily_minutes)
+            if cut > 0:
+                last["estimatedMinutes"] -= cut
+                total -= cut
+                warnings.append(
+                    f"{day} 任务总时长超出每日上限 {daily_minutes} 分钟，已把最后一条任务削减 {cut} 分钟"
+                )
+            else:
+                removed = day_tasks.pop()
+                total = sum(t["estimatedMinutes"] for t in day_tasks)
+                warnings.append(
+                    f"{day} 任务总时长超出每日上限，已移除任务「{removed['title'][:20]}」"
+                )
+        if len(day_tasks) > MAX_TASKS_PER_DAY:
+            extra = day_tasks[MAX_TASKS_PER_DAY:]
+            del day_tasks[MAX_TASKS_PER_DAY:]
+            warnings.append(f"{day} 任务条数超过 {MAX_TASKS_PER_DAY} 条，已移除 {len(extra)} 条")
+
+    cleaned = [task for day_tasks in by_day.values() for task in day_tasks]
+
+    # ---- 每日统计（日志用；修正后必然满足上限）----
     per_day: dict[str, int] = {}
-    per_day_count: dict[str, int] = {}
     for task in cleaned:
         per_day[task["taskDate"]] = per_day.get(task["taskDate"], 0) + task["estimatedMinutes"]
-        per_day_count[task["taskDate"]] = per_day_count.get(task["taskDate"], 0) + 1
-
-    over_limit = [
-        (d, minutes) for d, minutes in per_day.items() if minutes > daily_minutes
-    ]
-    if over_limit:
-        preview = "、".join(f"{d}({m}分钟)" for d, m in over_limit[:5])
-        errors.append(f"以下日期任务总时长超过每日上限 {daily_minutes} 分钟：{preview}")
-
-    too_many = [(d, c) for d, c in per_day_count.items() if c > MAX_TASKS_PER_DAY]
-    if too_many:
-        preview = "、".join(f"{d}({c}条)" for d, c in too_many[:5])
-        errors.append(f"以下日期任务条数超过 {MAX_TASKS_PER_DAY} 条：{preview}")
 
     if errors:
         logger.warning(
@@ -543,7 +708,10 @@ def generate_plan(
         "dailyMinutes": normalized.get("dailyMinutes", daily_minutes),
         "days": normalized.get("days", 0),
         "warnings": (final_state.get("warnings") or []) + ([] if valid else [f"校验未完全通过：{'；'.join(errors[:3])}"]),
-        "retries": int(final_state.get("retries") or 0),
+        # 语义换算：图内部的 retries 计的是"校验执行次数"（首次校验 = 1），
+        # 对外返回的是"真正发生了几次重试"（首轮通过 = 0）——
+        # 否则前端会把一次成功的生成显示成"Agent 自检重试 1 次"。
+        "retries": max(0, int(final_state.get("retries") or 0) - 1),
         "valid": valid,
         "errors": errors,
         "normalized": normalized,

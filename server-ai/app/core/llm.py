@@ -49,13 +49,18 @@ from app.core.logger import logger
 _REASONING_PASSTHROUGH_APPLIED = False
 
 
-@lru_cache(maxsize=8)
-def get_llm(streaming: bool = False, temperature: float = 0.3) -> ChatOpenAI:
-    """获取 ChatOpenAI 客户端（带缓存，按 streaming/temperature 维度缓存）。
+@lru_cache(maxsize=16)
+def get_llm(streaming: bool = False, temperature: float = 0.3,
+            timeout: float = 60, max_retries: int = 2) -> ChatOpenAI:
+    """获取 ChatOpenAI 客户端（带缓存，按参数维度缓存）。
 
     Args:
         streaming: 是否开启流式输出。
         temperature: 采样温度，默认 0.3。
+        timeout: 单次 HTTP 请求超时（秒）。默认 60；长输出场景（如规划 Agent
+            的任务 JSON）要显式放宽，否则会被客户端超时掐断。
+        max_retries: 传输层重试次数。注意总耗时上限 ≈ timeout × (1 + max_retries)，
+            长超时场景建议调小。
 
     Returns:
         配置好的 `ChatOpenAI` 实例。
@@ -70,10 +75,12 @@ def get_llm(streaming: bool = False, temperature: float = 0.3) -> ChatOpenAI:
         )
 
     logger.debug(
-        "创建 ChatOpenAI 客户端: model={} streaming={} temperature={}",
+        "创建 ChatOpenAI 客户端: model={} streaming={} temperature={} timeout={} max_retries={}",
         settings.dashscope_model,
         streaming,
         temperature,
+        timeout,
+        max_retries,
     )
     return ChatOpenAI(
         model=settings.dashscope_model,
@@ -81,8 +88,8 @@ def get_llm(streaming: bool = False, temperature: float = 0.3) -> ChatOpenAI:
         base_url=settings.dashscope_base_url,
         temperature=temperature,
         streaming=streaming,
-        timeout=60,
-        max_retries=2,
+        timeout=timeout,
+        max_retries=max_retries,
     )
 
 
