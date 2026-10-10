@@ -3,17 +3,21 @@ package com.studyagent.service.impl;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.studyagent.common.Result;
 import com.studyagent.common.exception.BizException;
 import com.studyagent.entity.PlanTask;
 import com.studyagent.entity.StudyPlan;
 import com.studyagent.mapper.StudyPlanMapper;
+import com.studyagent.model.dto.AgentPlanGenerateRequest;
 import com.studyagent.model.dto.PageQuery;
 import com.studyagent.model.dto.StudyPlanCreateRequest;
+import com.studyagent.model.vo.AgentPlanGenerateVO;
 import com.studyagent.model.vo.PageResult;
 import com.studyagent.model.vo.StudyPlanVO;
 import com.studyagent.service.PlanTaskGenerator;
 import com.studyagent.service.PlanTaskService;
+import com.studyagent.service.PythonClient;
 import com.studyagent.service.StudyPlanService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -43,6 +47,7 @@ public class StudyPlanServiceImpl extends ServiceImpl<StudyPlanMapper, StudyPlan
 
     private final PlanTaskService planTaskService;
     private final PlanTaskGenerator planTaskGenerator;
+    private final PythonClient pythonClient;
 
     // ------------------------------------------------------------------ 查询
 
@@ -154,6 +159,105 @@ public class StudyPlanServiceImpl extends ServiceImpl<StudyPlanMapper, StudyPlan
         plan.setStatus(status);
         updateById(plan);
         log.info("变更计划状态 planId={} status={}", planId, status);
+    }
+
+    // ------------------------------------------------------------------ AI 生成
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public AgentPlanGenerateVO generateByAgent(Long userId, AgentPlanGenerateRequest request) {
+        // 1) 调 Python 规划 Agent（只生成，不落库）
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("userId", userId);
+        if (StringUtils.hasText(request.getTitle())) {
+            payload.put("title", request.getTitle().trim());
+        }
+        payload.put("examType", request.getExamType());
+        payload.put("targetDate", request.getTargetDate().toString());
+        payload.put("dailyMinutes", request.getDailyMinutes());
+        payload.put("subjects", parseSubjects(request.getSubjects()));
+        if (StringUtils.hasText(request.getLevel())) {
+            payload.put("level", request.getLevel());
+        }
+
+        JsonNode result = pythonClient.generatePlan(payload);
+        JsonNode tasksNode = result.get("tasks");
+        if (tasksNode == null || !tasksNode.isArray() || tasksNode.isEmpty()) {
+            throw new BizException(Result.CODE_FAIL,
+                    "AI 没有生成任何任务，请检查目标日期与每日时长是否合理后重试");
+        }
+
+        AgentPlanGenerateVO vo = new AgentPlanGenerateVO();
+        vo.setTitle(result.path("title").asText(request.getTitle()));
+        vo.setTargetDate(result.path("targetDate").asText(request.getTargetDate().toString()));
+        vo.setDailyMinutes(result.path("dailyMinutes").asInt(request.getDailyMinutes()));
+        vo.setDays(result.path("days").asInt(0));
+        vo.setTotalTasks(tasksNode.size());
+        vo.setRetries(result.path("retries").asInt(0));
+        vo.setValid(result.path("valid").asBoolean(true));
+        List<String> warnings = new ArrayList<>();
+        for (JsonNode item : result.path("warnings")) {
+            warnings.add(item.asText());
+        }
+        vo.setWarnings(warnings);
+
+        if (!Boolean.TRUE.equals(request.getPersist())) {
+            return vo;
+        }
+
+        // 2) 落库（计划 + 任务），source 固定为「Agent生成」
+        StudyPlan plan = new StudyPlan();
+        plan.setUserId(userId);
+        plan.setTitle(vo.getTitle() == null ? "AI 生成计划" : vo.getTitle());
+        plan.setExamType(request.getExamType());
+        plan.setTargetDate(request.getTargetDate());
+        plan.setStartDate(LocalDate.now());
+        plan.setDailyMinutes(vo.getDailyMinutes());
+        plan.setStatus(STATUS_ONGOING);
+        plan.setSource("Agent生成");
+        save(plan);
+
+        List<PlanTask> tasks = new ArrayList<>(tasksNode.size());
+        int sort = 0;
+        LocalDate lastDate = null;
+        for (JsonNode item : tasksNode) {
+            String dateText = item.path("taskDate").asText("");
+            String title = item.path("title").asText("");
+            if (dateText.isBlank() || title.isBlank()) {
+                continue;
+            }
+            LocalDate taskDate;
+            try {
+                taskDate = LocalDate.parse(dateText.substring(0, 10));
+            } catch (Exception e) {
+                log.warn("跳过日期无法解析的 Agent 任务: {}", dateText);
+                continue;
+            }
+            if (!taskDate.equals(lastDate)) {
+                sort = 0;
+                lastDate = taskDate;
+            }
+            PlanTask task = new PlanTask();
+            task.setPlanId(plan.getId());
+            task.setUserId(userId);
+            task.setTaskDate(taskDate);
+            task.setTitle(title.length() <= 128 ? title : title.substring(0, 128));
+            task.setContent(item.path("content").asText(null));
+            task.setSubject(item.path("subject").asText(null));
+            task.setEstimatedMinutes(item.path("estimatedMinutes").asInt(60));
+            task.setStatus("待办");
+            task.setSort(sort++);
+            tasks.add(task);
+        }
+        if (!tasks.isEmpty()) {
+            planTaskService.saveBatch(tasks, 200);
+        }
+
+        vo.setPlanId(plan.getId());
+        vo.setSavedTasks(tasks.size());
+        log.info("AI 生成计划落库成功 userId={} planId={} 任务数={} 重试={} 告警={}",
+                userId, plan.getId(), tasks.size(), vo.getRetries(), warnings.size());
+        return vo;
     }
 
     // ------------------------------------------------------------------ 越权防护

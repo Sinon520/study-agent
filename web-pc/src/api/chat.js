@@ -65,8 +65,24 @@ export async function chatStream(payload, handlers = {}) {
     throw new Error('未登录或登录已过期')
   }
   if (!response.ok) {
+    // 关键：Java 侧在"还没开始推送"时返回的是正常 JSON 错误体
+    // （{code, msg, traceId}），后端已经把技术细节翻译成了可操作提示
+    // （例如"本地向量模型尚未就绪，请先执行 download_models.py"），
+    // 这里必须把它取出来展示，而不是丢一句 HTTP 500。
     const text = await response.text().catch(() => '')
-    throw new Error(`问答接口返回 HTTP ${response.status}：${text.slice(0, 200)}`)
+    let message = `问答接口返回 HTTP ${response.status}`
+    try {
+      const body = JSON.parse(text)
+      if (body && body.msg) {
+        message = body.msg
+      }
+    } catch {
+      if (text) message += `：${text.slice(0, 200)}`
+    }
+    if (onError) {
+      onError(message)
+    }
+    throw new Error(message)
   }
   if (!response.body) {
     throw new Error('当前浏览器不支持流式响应（response.body 为空）')

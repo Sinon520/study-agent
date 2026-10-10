@@ -63,4 +63,13 @@ export const planApi = {
   changeTaskStatus(data) {
     return request.put('/plan/task/status', data)
   },
+
+  /**
+   * AI 生成计划（LangGraph 规划 Agent）。
+   * 生成 + 落库都在后端完成，成功后直接刷新列表即可。
+   * 首次调用会触发本地 BGE-M3 模型加载，故超时放宽到 5 分钟。
+   */
+  agentGenerate(data) {
+    return request.post('/plan/agent-generate', data, { timeout: 300000 })
+  },
 }

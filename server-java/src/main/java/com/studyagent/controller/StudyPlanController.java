@@ -2,10 +2,12 @@ package com.studyagent.controller;
 
 import com.studyagent.common.Result;
 import com.studyagent.entity.PlanTask;
+import com.studyagent.model.dto.AgentPlanGenerateRequest;
 import com.studyagent.model.dto.PageQuery;
 import com.studyagent.model.dto.PlanTaskRequest;
 import com.studyagent.model.dto.PlanTaskStatusRequest;
 import com.studyagent.model.dto.StudyPlanCreateRequest;
+import com.studyagent.model.vo.AgentPlanGenerateVO;
 import com.studyagent.model.vo.PageResult;
 import com.studyagent.model.vo.PlanTaskVO;
 import com.studyagent.model.vo.StudyPlanVO;
@@ -144,5 +146,26 @@ public class StudyPlanController {
             description = "置为完成时自动写 study_record（进度统计的数据源）；改回待办会移除该记录")
     public Result<PlanTaskVO> changeTaskStatus(@Valid @RequestBody PlanTaskStatusRequest request) {
         return Result.ok("状态已更新", PlanTaskVO.from(planTaskService.changeStatus(UserContext.userId(), request)));
+    }
+
+    // ------------------------------------------------------------ AI 生成计划
+
+    /**
+     * 「AI 生成计划」入口。
+     *
+     * <p>编排：Java 校验登录用户 → 调 Python 的 LangGraph 规划 Agent 生成逐日任务
+     * → Java 在本方法内落库（计划 + 任务，source=Agent生成）→ 返回结果。</p>
+     *
+     * <p>为什么不让 Python 直接落库：用户侧链路必须在一个事务里完成，
+     * 且 userId 必须来自 JWT。让 Python 拿 userId 去调内部接口，
+     * 等于把用户上下文交给了另一个进程，配额与审计也无处安放。</p>
+     */
+    @PostMapping("/agent-generate")
+    @Operation(summary = "AI 生成学习计划（LangGraph 规划 Agent）",
+            description = "生成逐日任务并自动入库，source=Agent生成。"
+                    + "Agent 内部会做日期连续性与每日时长校验，不合格自动重试（最多 2 次）")
+    public Result<AgentPlanGenerateVO> agentGenerate(@Valid @RequestBody AgentPlanGenerateRequest request) {
+        Long userId = UserContext.userId();
+        return Result.ok("计划已生成", studyPlanService.generateByAgent(userId, request));
     }
 }

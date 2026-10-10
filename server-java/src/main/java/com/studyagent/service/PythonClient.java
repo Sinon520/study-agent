@@ -24,4 +24,16 @@ public interface PythonClient {
 
     /** 删除某文档在向量库里的全部切片 */
     void deleteVectors(Long documentId);
+
+    /**
+     * 调用规划 Agent 生成逐日计划（**只生成不落库**）。
+     *
+     * <p>落库由 Java 自己做（{@code /plan/agent-generate}），因为：
+     * 用户侧要的是"校验登录用户 → 生成 → 落库"的完整事务语义，
+     * 如果让 Python 拿着 userId 直接调内部落库接口，就绕过了用户上下文，
+     * 也不便于在同一处做配额与审计。</p>
+     *
+     * @return Python 原始响应（含 tasks / warnings / retries 等字段）
+     */
+    com.fasterxml.jackson.databind.JsonNode generatePlan(java.util.Map<String, Object> payload);
 }

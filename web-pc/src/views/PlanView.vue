@@ -8,9 +8,10 @@
       <div>
         <el-button type="primary" :icon="'Plus'" @click="openCreate">新建计划</el-button>
         <el-button
+          type="primary"
           :icon="'MagicStick'"
           :loading="generating"
-          @click="onAgentCreate"
+          @click="openAgentDialog"
         >
           AI 生成计划
         </el-button>
@@ -138,6 +139,72 @@
       </template>
     </el-dialog>
 
+    <!-- ------------------------- AI 生成计划 --------------- -->
+    <el-dialog v-model="agentVisible" title="AI 生成学习计划" width="560px">
+      <el-alert
+        type="info"
+        :closable="false"
+        show-icon
+        title="规划 Agent 会按目标日期与每日时长拆分逐日任务"
+        description="Agent 内部会校验日期连续性与每日时长上限，不合格自动重新生成（最多 2 次）。生成后直接入库，来源标记为「AI 生成」。"
+        class="agent-tip"
+      />
+
+      <el-form :model="agentForm" label-width="110px">
+        <el-form-item label="考试类型" required>
+          <el-radio-group v-model="agentForm.examType">
+            <el-radio-button value="考研">考研</el-radio-button>
+            <el-radio-button value="考公">考公</el-radio-button>
+          </el-radio-group>
+        </el-form-item>
+
+        <el-form-item label="目标考试日期" required>
+          <el-date-picker
+            v-model="agentForm.targetDate"
+            type="date"
+            value-format="YYYY-MM-DD"
+            placeholder="选择考试日期"
+            style="width: 100%"
+          />
+        </el-form-item>
+
+        <el-form-item label="每日时长" required>
+          <el-input-number v-model="agentForm.dailyMinutes" :min="10" :max="1440" :step="10" />
+          <span class="form-hint">分钟</span>
+        </el-form-item>
+
+        <el-form-item label="要覆盖的科目" required>
+          <el-select
+            v-model="agentSubjects"
+            multiple
+            filterable
+            allow-create
+            default-first-option
+            style="width: 100%"
+          >
+            <el-option v-for="s in subjectOptions" :key="s" :label="s" :value="s" />
+          </el-select>
+        </el-form-item>
+
+        <el-form-item label="基础水平">
+          <el-input
+            v-model="agentForm.level"
+            type="textarea"
+            :rows="2"
+            maxlength="200"
+            placeholder="可选，如「英语基础一般，政治零基础」——描述越具体，任务安排越贴合"
+          />
+        </el-form-item>
+      </el-form>
+
+      <template #footer>
+        <el-button @click="agentVisible = false">取消</el-button>
+        <el-button type="primary" :loading="generating" @click="onAgentCreate">
+          {{ generating ? 'Agent 正在规划…' : '开始生成' }}
+        </el-button>
+      </template>
+    </el-dialog>
+
     <!-- ------------------------- 任务抽屉 --------------- -->
     <el-drawer v-model="drawerVisible" :title="currentPlan?.title || '任务列表'" size="620px">
       <div class="drawer-toolbar">
@@ -220,6 +287,16 @@ const form = reactive({
   dailyMinutes: 120,
 })
 const subjectList = ref(['英语'])
+
+// AI 生成计划弹窗
+const agentVisible = ref(false)
+const agentSubjects = ref(['英语', '政治'])
+const agentForm = reactive({
+  examType: '考研',
+  targetDate: '',
+  dailyMinutes: 120,
+  level: '',
+})
 
 const rules = {
   title: [{ required: true, message: '请输入计划标题', trigger: 'blur' }],
@@ -419,14 +496,65 @@ async function removeTask(task) {
 }
 
 /**
- * AI 生成计划。
- * 第 3 周接入 Python 的 LangGraph 规划 Agent（POST /plan/agent-create），
- * 这里先把入口和交互做出来，避免第 3 周再动页面结构。
+ * AI 生成计划：调后端 /plan/agent-generate。
+ *
+ * 后端内部编排：Java 校验登录用户 → Python LangGraph 规划 Agent 生成逐日任务
+ * （信息补全 → 生成 → 校验，不合格自动重试最多 2 次）→ Java 落库（source=Agent生成）。
+ *
+ * 为什么用对话框而不是直接点一下就用当前筛选条件：
+ * Agent 需要"考试类型 / 目标日期 / 每日时长"这几个必填信息才能规划，
+ * 弹窗收集一次比让用户先去建个空计划再改更合理。
  */
+function openAgentDialog() {
+  Object.assign(agentForm, {
+    examType: '考研',
+    targetDate: '',
+    dailyMinutes: 120,
+    level: '',
+  })
+  agentSubjects.value = ['英语', '政治']
+  agentVisible.value = true
+}
+
 async function onAgentCreate() {
+  if (!agentForm.targetDate) {
+    ElMessage.warning('请选择目标考试日期')
+    return
+  }
+  if (!agentSubjects.value.length) {
+    ElMessage.warning('请至少选择一个科目')
+    return
+  }
+
   generating.value = true
   try {
-    ElMessage.info('AI 生成计划将在第 3 周接入（LangGraph 规划 Agent），当前请使用「新建计划」')
+    const result = await planApi.agentGenerate({
+      examType: agentForm.examType,
+      targetDate: agentForm.targetDate,
+      dailyMinutes: agentForm.dailyMinutes,
+      subjects: agentSubjects.value.join(','),
+      level: agentForm.level || undefined,
+      persist: true,
+    })
+
+    const lines = [
+      `已生成《${result.title}》，共 ${result.totalTasks} 条任务，覆盖 ${result.days} 天`,
+    ]
+    if (result.retries) {
+      lines.push(`Agent 自检重试 ${result.retries} 次`)
+    }
+    if (result.warnings?.length) {
+      lines.push(...result.warnings.slice(0, 3))
+    }
+    ElMessageBox.alert(lines.join('<br/>'), 'AI 生成完成', {
+      dangerouslyUseHTMLString: true,
+      confirmButtonText: '查看计划',
+    }).catch(() => {})
+
+    agentVisible.value = false
+    await loadPlans()
+  } catch (e) {
+    // 拦截器已提示（后端会把"模型未就绪"翻译成可操作提示）
   } finally {
     generating.value = false
   }
@@ -496,6 +624,10 @@ onMounted(loadPlans)
   margin-left: 8px;
   font-size: 12px;
   color: #909399;
+}
+
+.agent-tip {
+  margin-bottom: 16px;
 }
 
 .drawer-toolbar {

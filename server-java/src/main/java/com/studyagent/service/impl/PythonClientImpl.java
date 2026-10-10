@@ -94,6 +94,13 @@ public class PythonClientImpl implements PythonClient {
 
     // ------------------------------------------------------------------ 内部
 
+    @Override
+    public JsonNode generatePlan(Map<String, Object> payload) {
+        // 显式 persist=false：落库由 Java 做（见 AgentPlanController 的说明）
+        payload.put("persist", false);
+        return post("/agent/plan", payload, "AI 生成计划");
+    }
+
     private JsonNode post(String path, Map<String, Object> body, String action) {
         try {
             String raw = traceIdHeader(

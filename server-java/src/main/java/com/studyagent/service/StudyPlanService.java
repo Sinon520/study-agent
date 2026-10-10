@@ -34,6 +34,16 @@ public interface StudyPlanService extends IService<StudyPlan> {
     void changePlanStatus(Long userId, Long planId, String status);
 
     /**
+     * 调用 AI 规划 Agent 生成计划并落库。
+     *
+     * <p>与 {@link #createPlan} 的区别：任务不是"按天数均摊"算出来的，
+     * 而是 Python 的 LangGraph Agent 生成、经 Java 校验后落库的，
+     * {@code source} 标记为「Agent生成」。</p>
+     */
+    com.studyagent.model.vo.AgentPlanGenerateVO generateByAgent(
+            Long userId, com.studyagent.model.dto.AgentPlanGenerateRequest request);
+
+    /**
      * 取当前用户拥有的计划，不存在或不属于该用户时抛异常。
      * <p>所有涉及单个计划的操作都必须先过这一层，
      * 从根上避免"改 URL 里的 planId 就能操作别人数据"的水平越权。</p>
