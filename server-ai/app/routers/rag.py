@@ -44,7 +44,7 @@ router = APIRouter(prefix="/rag", tags=["rag"])
 
 
 @router.post("/ingest", response_model=IngestResponse, summary="文档入库（解析→分块→向量化→写 Milvus）")
-async def ingest(request: IngestRequest, background_tasks: BackgroundTasks) -> IngestResponse:
+def ingest(request: IngestRequest, background_tasks: BackgroundTasks) -> IngestResponse:
     """把本地文件解析、分块、向量化并写入 Milvus，同时回写 MySQL 的 kb_chunk。
 
     流程（对应执行计划 Day 15）：
@@ -56,6 +56,9 @@ async def ingest(request: IngestRequest, background_tasks: BackgroundTasks) -> I
     6. 更新 kb_document 状态为「完成」。
 
     任一步失败都会把文档状态置为「失败」并带上原因，避免前端一直转圈。
+
+    ⚠️ 同步 `def` 端点：解析/向量化是分钟级阻塞操作，跑在 FastAPI 线程池里 ——
+    否则 async 端点会在入库全程占死事件循环，上传资料期间问答/健康检查全部卡住。
     """
     settings = get_settings()
     document_id = request.document_id

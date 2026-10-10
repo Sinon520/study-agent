@@ -18,5 +18,6 @@ cd D:\code\wkbdy\study-agent\server-ai
 | `llm_probe2.py` | 完整流式对比 + TTFT：统计 chunk 数、首个 reasoning / content chunk 下标、累计长度 | 原生：77 chunk，第 1 个出 reasoning、第 74 个出 content；LangChain：`additional_kwargs` 全程为空，仅 usage 里残留 `reasoning_tokens` |
 | `llm_probe3.py` | 验证「模块级猴补丁」能否让 LangChain 保留 `reasoning_content` | 可以：补丁后非流式/流式的 `additional_kwargs` 均有值（即 `core/llm.py` 里 `enable_reasoning_passthrough()` 的原型） |
 | `sse_probe.py` | 作为客户端消费 `/debug/stream`，用时间戳证明 SSE 是**逐块**下发而非一次性缓冲 | 90 个事件 / 3.70s，首个 reasoning +0.42s、首个 content +3.66s，跨度 3.60s → 纯 ASGI traceId 中间件不缓冲 SSE |
+| `report_concurrency_probe.py` | 3 路并发打 `/agent/report`，验证同步 `def` 端点（线程池）确实并行而非被事件循环串行 | 修复前 6 个请求串行 4.5 分钟；修复后 3 路并发 60.2s 全部完成（单个 43~60s）→ **长阻塞端点必须用同步 `def`** |
 
-> 注：`sse_probe.py` 需要服务已在 8000 端口运行。
+> 注：`sse_probe.py` 与 `report_concurrency_probe.py` 需要服务已在 8000 端口运行。

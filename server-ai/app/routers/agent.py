@@ -118,12 +118,16 @@ CLASSIFY_PROMPT = """你是备考错题归类助手。请根据题目内容判�
 
 
 @router.post("/classify", response_model=ClassifyResponse, summary="错题归类（AI 打标签）")
-async def classify(request: ClassifyRequest) -> ClassifyResponse:
+def classify(request: ClassifyRequest) -> ClassifyResponse:
     """给一道错题判定科目与知识点标签。
 
     由 Java 的 RocketMQ 消费者在收到 `wrong-classify` 消息后调用。
     返回的标签由 Java 侧写入 `wrong_question_tag` / `wrong_question_tag_rel`，
     唯一键 `uk_question_tag` 保证重复消费天然幂等。
+
+    ⚠️ 端点是同步 `def`（不是 `async def`）：内部 `llm.invoke()` 是阻塞调用，
+    在 async 端点里会占死事件循环。FastAPI 对 `def` 端点自动用线程池执行，
+    多个归类请求才能并行（第 4 周实测：async def 下 6 个报告请求被串行成 5 分钟）。
     """
     prompt = CLASSIFY_PROMPT.format(
         content=request.content[:3000],
@@ -191,11 +195,14 @@ REPORT_PROMPT = """你是备考学习教练。请根据学生的本周学习数�
 
 
 @router.post("/report", response_model=ReportResponse, summary="生成复盘报告")
-async def report(request: ReportRequest) -> ReportResponse:
+def report(request: ReportRequest) -> ReportResponse:
     """根据 Java 聚合好的统计数据生成 markdown 复盘报告。
 
     数据聚合放在 Java（那里能直接读 study_record / plan_task / wrong_question），
     Python 只负责"把数字变成有洞察的文字"。
+
+    同步 `def` 端点的原因同 `/agent/classify`：LLM 调用阻塞，必须交给线程池，
+    否则周报批量生成时（周日 20:00 一次 6 个用户）会被事件循环串行化。
     """
     stats_text = _format_stats(request.stats)
     prompt = REPORT_PROMPT.format(
@@ -301,11 +308,14 @@ def _string_list(value, limit: int) -> list[str]:
     response_model=PlanGenerateResponse,
     summary="规划 Agent 生成学习计划（LangGraph 三节点）",
 )
-async def plan(request: PlanGenerateRequest) -> PlanGenerateResponse:
+def plan(request: PlanGenerateRequest) -> PlanGenerateResponse:
     """用 LangGraph 编排的 Agent 生成逐日学习计划，并（可选）回调 Java 落库。
 
     图结构：信息补全 → 计划生成 → 校验调整（不合法回上一步，最多重试 2 次）。
     详见 `app/services/plan_agent.py` 的模块注释。
+
+    同步 `def` 端点：规划是分钟级阻塞任务，跑在线程池里，
+    生成期间问答/健康检查等其他请求不受影响。
     """
     result = generate_plan(
         exam_type=request.exam_type,
