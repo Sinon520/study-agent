@@ -1,0 +1,180 @@
+server:
+  # 显式固定端口：本机工具会注入 SERVER_PORT 环境变量，不能让端口跑偏
+  port: 8080
+  servlet:
+    encoding:
+      charset: UTF-8
+      force: true
+  # 关闭 Server 头信息，减少信息泄露
+  tomcat:
+    max-swallow-size: -1
+  shutdown: graceful
+
+spring:
+  application:
+    name: server-java
+
+  profiles:
+    active: default
+
+  # ==================== MySQL ====================
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://${MYSQL_HOST:127.0.0.1}:${MYSQL_PORT:3306}/${MYSQL_DATABASE:study_agent}?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: ${MYSQL_USERNAME:root}
+    password: ${MYSQL_PASSWORD:123456}
+    hikari:
+      pool-name: StudyAgentHikariPool
+      # 连接池大小
+      maximum-pool-size: 10
+      minimum-idle: 2
+      # 获取连接超时 30s
+      connection-timeout: 30000
+      # 空闲连接超时 10 分钟
+      idle-timeout: 600000
+      # 连接最大存活时间 30 分钟
+      max-lifetime: 1800000
+      connection-test-query: SELECT 1
+      auto-commit: true
+
+  # ==================== Redis ====================
+  data:
+    redis:
+      host: ${REDIS_HOST:127.0.0.1}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      database: ${REDIS_DATABASE:0}
+      timeout: 5000ms
+      connect-timeout: 5000ms
+      client-type: lettuce
+      lettuce:
+        pool:
+          # 连接池最大连接数
+          max-active: 8
+          # 最大空闲连接
+          max-idle: 8
+          # 最小空闲连接
+          min-idle: 0
+          # 获取连接最大等待时间
+          max-wait: 5000ms
+        shutdown-timeout: 200ms
+
+  jackson:
+    date-format: yyyy-MM-dd HH:mm:ss
+    time-zone: Asia/Shanghai
+    default-property-inclusion: non_null
+    serialization:
+      write-dates-as-timestamps: false
+      fail-on-empty-beans: false
+    deserialization:
+      fail-on-unknown-properties: false
+
+  servlet:
+    multipart:
+      max-file-size: 50MB
+      max-request-size: 100MB
+
+# ==================== MyBatis-Plus ====================
+mybatis-plus:
+  # mapper xml 位置
+  mapper-locations: classpath*:/mapper/**/*.xml
+  # 实体扫描，多个 package 用逗号或分号分隔
+  type-aliases-package: com.studyagent.entity
+  configuration:
+    # 下划线转驼峰
+    map-underscore-to-camel-case: true
+    # 关闭一级缓存之外的二级缓存
+    cache-enabled: false
+    # 调试用：控制台打印 SQL
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    banner: false
+    db-config:
+      id-type: auto
+      # 逻辑删除
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+      # 表名、字段名下划线风格
+      table-underline: true
+
+# ==================== RocketMQ ====================
+# 第 1 周只做依赖引入 + 配置项。
+# 注意：Broker 当前对客户端开启了 ACL 鉴权，普通 producer/consumer 会报
+# RemotingException ... CODE: 1 DESC: check client ip or username failed，
+# 因此本周不写 @RocketMQMessageListener 消费者，也不做实际收发。
+rocketmq:
+  name-server: ${ROCKETMQ_NAME_SERVER:127.0.0.1:9876}
+  producer:
+    group: study-agent-producer
+    send-message-timeout: 3000
+    retry-times-when-send-failed: 2
+    retry-times-when-send-async-failed: 2
+    # 消息轨迹需要额外的 trace topic，本周关闭
+    enable-msg-trace: false
+  # 未配置 consumer.group，也不会创建任何消费者 Bean
+
+# ==================== JWT（自定义配置段） ====================
+jwt:
+  # 长度必须 >= 32 字节（HS256 要求），生产环境务必通过环境变量覆盖
+  secret: ${JWT_SECRET:study-agent-jwt-secret-key-please-change-in-production-2025}
+  # access token 2 小时
+  access-expire-seconds: 7200
+  # refresh token 7 天
+  refresh-expire-seconds: 604800
+  # token 签发者与请求头
+  issuer: study-agent
+  header: Authorization
+  prefix: "Bearer "
+  # refresh token 在 Redis 中的 key 前缀，完整 key：auth:refresh:<userId>:<jti>
+  refresh-key-prefix: "auth:refresh:"
+
+# ==================== 微信小程序（第 4 周换真实值） ====================
+wx:
+  appid: wx_test_appid
+  secret: wx_test_secret
+
+# ==================== 应用自定义配置 ====================
+app:
+  upload-dir: ./uploads
+  python-base-url: http://127.0.0.1:8000
+
+# ==================== Knife4j / springdoc ====================
+springdoc:
+  api-docs:
+    enabled: true
+    path: /v3/api-docs
+  swagger-ui:
+    enabled: true
+    path: /swagger-ui.html
+    tags-sorter: alpha
+    operations-sorter: alpha
+    disable-swagger-default-url: true
+  default-produces-media-type: application/json
+  show-actuator: false
+
+# ==================== Actuator ====================
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: never
+
+# ==================== 日志 ====================
+logging:
+  config: classpath:logback-spring.xml
+  level:
+    root: info
+    com.studyagent: debug
+    # MyBatis-Plus / MyBatis 打印 SQL（StdOutImpl 已单独输出在控制台）
+    com.studyagent.mapper: debug
+    org.springframework.web: info
+    org.springframework.security: info
+    # RocketMQ 客户端本周不实际使用，降噪
+    org.apache.rocketmq: warn
+    com.alibaba.nacos: warn
+  file:
+    name: ./logs/server-java.log

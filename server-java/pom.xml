@@ -1,0 +1,256 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!-- 不使用 spring-boot-starter-parent，改为 import BOM，
+         这样 finalName 完全可控，产物保持 server-java-1.0.0-SNAPSHOT.jar -->
+    <groupId>com.studyagent</groupId>
+    <artifactId>server-java</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <packaging>jar</packaging>
+    <name>study-agent-server</name>
+    <description>备考学习 Agent 服务端（Java 业务主栈）</description>
+
+    <properties>
+        <java.version>21</java.version>
+        <maven.compiler.release>21</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+
+        <spring-boot.version>3.3.5</spring-boot.version>
+
+        <mybatis-plus.version>3.5.7</mybatis-plus.version>
+        <mysql.version>8.4.0</mysql.version>
+        <rocketmq-spring.version>2.3.1</rocketmq-spring.version>
+        <easyexcel.version>3.3.4</easyexcel.version>
+        <springdoc.version>2.6.0</springdoc.version>
+        <jjwt.version>0.12.6</jjwt.version>
+        <lombok.version>1.18.34</lombok.version>
+
+        <!-- 保证最终 jar 名字带 -SNAPSHOT -->
+        <final.name>${project.artifactId}-${project.version}</final.name>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-dependencies</artifactId>
+                <version>${spring-boot.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <dependencies>
+        <!-- ============ Web / 校验 / AOP ============ -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-aop</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+
+        <!-- ============ 安全 ============ -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security</artifactId>
+        </dependency>
+
+        <!-- ============ Redis ============ -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-pool2</artifactId>
+        </dependency>
+
+        <!-- ============ 持久层 ============ -->
+        <!-- 注意：Spring Boot 3 必须用 mybatis-plus-spring-boot3-starter -->
+        <dependency>
+            <groupId>com.baomidou</groupId>
+            <artifactId>mybatis-plus-spring-boot3-starter</artifactId>
+            <version>${mybatis-plus.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.mysql</groupId>
+            <artifactId>mysql-connector-j</artifactId>
+            <version>${mysql.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!-- ============ 消息队列（本周只引依赖 + 配置，不写消费者） ============ -->
+        <dependency>
+            <groupId>org.apache.rocketmq</groupId>
+            <artifactId>rocketmq-spring-boot-starter</artifactId>
+            <version>${rocketmq-spring.version}</version>
+            <exclusions>
+                <!-- 只排除 Spring Boot 默认日志实现，避免和 logback-spring.xml 冲突 -->
+                <exclusion>
+                    <groupId>org.springframework.boot</groupId>
+                    <artifactId>spring-boot-starter-logging</artifactId>
+                </exclusion>
+                <!--
+                  注意（踩坑记录）：下面两个「不能排除」。
+                  rocketmq-client 的类（如 org.apache.rocketmq.common.utils.StartupUtil、
+                  RocketMQUtil 用到的 client logger）在字节码里直接引用了
+                  org.apache.rocketmq.logging.org.slf4j.LoggerFactory，
+                  该包由 io.github.aliyunmq:rocketmq-slf4j-api / rocketmq-logback-classic 提供。
+                  一旦排除，启动时创建 DefaultMQProducer 就会
+                  ClassNotFoundException: org.apache.rocketmq.logging.org.slf4j.LoggerFactory
+                  并导致 APPLICATION FAILED TO START。
+                  这两个 jar 的 provider 被 relocate 到 org.apache.rocketmq.logging.*，
+                  不会和 logback-classic 抢 SLF4J provider（各自独立的 ServiceLoader 条目），
+                  所以保留即可，RocketMQ 客户端日志走自己的通道，本项目日志走 logback。
+                -->
+            </exclusions>
+        </dependency>
+
+        <!-- ============ Excel ============ -->
+        <dependency>
+            <groupId>com.alibaba</groupId>
+            <artifactId>easyexcel</artifactId>
+            <version>${easyexcel.version}</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.apache.commons</groupId>
+                    <artifactId>commons-compress</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+
+        <!-- ============ API 文档 ============ -->
+        <dependency>
+            <groupId>org.springdoc</groupId>
+            <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+            <version>${springdoc.version}</version>
+        </dependency>
+
+        <!-- ============ JWT ============ -->
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-api</artifactId>
+            <version>${jjwt.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-impl</artifactId>
+            <version>${jjwt.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-jackson</artifactId>
+            <version>${jjwt.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!-- ============ Lombok ============ -->
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <version>${lombok.version}</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- ============ 测试 ============ -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <finalName>${final.name}</finalName>
+
+        <plugins>
+            <!-- 编译插件：显式声明 annotationProcessorPaths，保证 Lombok 在 Spring Boot 3 + JDK21 下生效 -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.13.0</version>
+                <configuration>
+                    <release>${maven.compiler.release}</release>
+                    <encoding>UTF-8</encoding>
+                    <parameters>true</parameters>
+                    <annotationProcessorPaths>
+                        <path>
+                            <groupId>org.projectlombok</groupId>
+                            <artifactId>lombok</artifactId>
+                            <version>${lombok.version}</version>
+                        </path>
+                    </annotationProcessorPaths>
+                </configuration>
+            </plugin>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-resources-plugin</artifactId>
+                <version>3.3.1</version>
+                <configuration>
+                    <encoding>UTF-8</encoding>
+                </configuration>
+            </plugin>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.2.5</version>
+                <configuration>
+                    <argLine>-Dfile.encoding=UTF-8</argLine>
+                </configuration>
+            </plugin>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.4.1</version>
+            </plugin>
+
+            <!-- 可执行 jar：repackage -->
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <version>${spring-boot.version}</version>
+                <configuration>
+                    <mainClass>com.studyagent.StudyAgentApplication</mainClass>
+                    <excludes>
+                        <exclude>
+                            <groupId>org.projectlombok</groupId>
+                            <artifactId>lombok</artifactId>
+                        </exclude>
+                    </excludes>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>repackage</id>
+                        <goals>
+                            <goal>repackage</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  logback 配置（Spring Boot 3）
+
+  pattern 中必须包含 [%X{traceId}]，与 TraceIdFilter 写入 MDC 的 key 一致，
+  这样每一条日志都能带上链路追踪 ID。
+
+  注意：%X{traceId} 取不到值时会打印 "traceId_IS_UNDEFINED"，
+  因此统一写成 %X{traceId:-}（默认空串），避免污染日志。
+
+  坑：%clr 与 %wEx 是 Spring Boot 的 "defaults.xml" 里通过 conversionRule 注册的扩展转换词，
+  只有在「不显式指定 logging.config，由 Spring Boot 自己加载 logback-spring.xml」时才注册。
+  本项目显式配置了 logging.config=classpath:logback-spring.xml，走的是
+  initializeWithSpecificConfig 分支，defaults.xml 不会被加载，
+  所以必须在这里自己注册颜色转换器，否则启动直接失败：
+    IllegalStateException: Logback configuration error detected:
+      There is no conversion class registered for composite conversion word [clr]
+      [wEx] is not a valid conversion word
+  这里用 <conversionRule> 自行注册 clr（非 TTY 环境下自动降级为纯文本），
+  控制台 pattern 里也不再使用 %wEx（异常堆栈用 %ex 输出全文即可）。
+-->
+<configuration scan="false">
+
+    <!-- 自定义颜色转换器：等价于 Spring Boot defaults.xml 里的 clr 规则 -->
+    <conversionRule conversionWord="clr"
+                    converterClass="org.springframework.boot.logging.logback.ColorConverter"/>
+
+    <springProperty scope="context" name="APP_NAME" source="spring.application.name" defaultValue="server-java"/>
+    <property name="LOG_DIR" value="./logs"/>
+    <property name="LOG_FILE" value="${LOG_DIR}/server-java.log"/>
+
+    <!-- ==================== 控制台 ==================== -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%clr(%d{yyyy-MM-dd HH:mm:ss.SSS}){faint} %clr(%5p) %clr([%X{traceId:-}]){magenta} %clr([%15.15t]){faint} %clr(%-40.40logger{39}){cyan} %clr(:){faint} %m%n%ex</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <!-- ==================== 滚动文件 ==================== -->
+    <!-- 按天 + 按大小滚动，保留 15 天，总大小上限 1GB -->
+    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_FILE}</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>${LOG_DIR}/server-java.%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+            <maxFileSize>100MB</maxFileSize>
+            <maxHistory>15</maxHistory>
+            <totalSizeCap>1GB</totalSizeCap>
+            <cleanHistoryOnStart>true</cleanHistoryOnStart>
+        </rollingPolicy>
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%X{traceId:-}] [%thread] %logger{50} - %msg%n</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <!-- ==================== 错误日志单独归档，方便快速定位 ==================== -->
+    <appender name="ERROR_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_DIR}/server-java-error.log</file>
+        <filter class="ch.qos.logback.classic.filter.ThresholdFilter">
+            <level>WARN</level>
+        </filter>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>${LOG_DIR}/server-java-error.%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+            <maxFileSize>50MB</maxFileSize>
+            <maxHistory>15</maxHistory>
+            <totalSizeCap>500MB</totalSizeCap>
+        </rollingPolicy>
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%X{traceId:-}] [%thread] %logger{50} - %msg%n</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <!-- ==================== 异步包装，降低磁盘 IO 对业务线程的影响 ==================== -->
+    <!--
+      踩坑记录：这里刻意【不】使用 neverBlock="true" + discardingThreshold="0"。
+      那组配置在队列打满时会静默丢弃日志事件（offer 失败即 return），
+      现场表现为「服务照常响应 HTTP，但控制台和滚动文件同时不再输出任何日志」，
+      极难排查。改成默认的阻塞式 put（neverBlock=false）：
+      队列满时业务线程会短暂等待并被 logback 记入 status，宁可慢一点也不丢日志。
+      discardingThreshold 保持默认（0 = 不丢弃任何级别）。
+    -->
+    <appender name="ASYNC_FILE" class="ch.qos.logback.classic.AsyncAppender">
+        <queueSize>2048</queueSize>
+        <neverBlock>false</neverBlock>
+        <includeCallerData>false</includeCallerData>
+        <appender-ref ref="FILE"/>
+    </appender>
+
+    <appender name="ASYNC_ERROR_FILE" class="ch.qos.logback.classic.AsyncAppender">
+        <queueSize>512</queueSize>
+        <neverBlock>false</neverBlock>
+        <includeCallerData>false</includeCallerData>
+        <appender-ref ref="ERROR_FILE"/>
+    </appender>
+
+    <!-- 第三方框架降噪 -->
+    <logger name="org.apache.rocketmq" level="WARN"/>
+    <logger name="com.alibaba.nacos" level="WARN"/>
+    <logger name="io.lettuce" level="INFO"/>
+    <logger name="org.apache.ibatis" level="INFO"/>
+
+    <!-- 业务包 DEBUG，方便看 traceId 与 SQL -->
+    <logger name="com.studyagent" level="DEBUG"/>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="ASYNC_FILE"/>
+        <appender-ref ref="ASYNC_ERROR_FILE"/>
+    </root>
+
+</configuration>

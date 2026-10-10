@@ -289,11 +289,16 @@ CREATE TABLE `chat_message` (
 -- ---------------------------------------------------------------------
 -- 初始化数据：默认演示账号
 --   密码明文：123456
---   BCrypt 密文：$2a$10$7JB720yubVSZvUI0rEqK/.VqGOZTH.ulu33dHOiBE8ByOhJIrdAu2
---   说明：该密文由 BCryptPasswordEncoder(strength=10) 生成，登录时由 Spring Security 校验。
+--   BCrypt 密文（由 BCryptPasswordEncoder(strength=10) 生成，
+--   并已用 passwordEncoder.matches("123456", hash) 实测校验为 true）：
+--     $2a$10$2wkCrDJsWfTF4lAFvfinJe6A8Yc4nLEizy32iL3HXG6rY6X7M9lFa
+--   注意：不要凭记忆手写 BCrypt 密文。历史上这里曾放过一个"看起来像
+--   Spring 官方文档示例"的密文，实测 matches("123456") 返回 false，
+--   导致新拉库的开发者用 demo/123456 永远登录失败。
+--   需要更换密码时，用 com.studyagent.tool.BCryptGenTest 重新生成并回填。
 -- ---------------------------------------------------------------------
 INSERT INTO `sys_user` (`username`, `password`, `nickname`, `exam_type`, `status`)
-SELECT 'demo', '$2a$10$7JB720yubVSZvUI0rEqK/.VqGOZTH.ulu33dHOiBE8ByOhJIrdAu2', '演示同学', '考研', 1
+SELECT 'demo', '$2a$10$2wkCrDJsWfTF4lAFvfinJe6A8Yc4nLEizy32iL3HXG6rY6X7M9lFa', '演示同学', '考研', 1
 FROM DUAL
 WHERE NOT EXISTS (SELECT 1 FROM `sys_user` WHERE `username` = 'demo');
 

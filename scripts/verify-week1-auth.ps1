@@ -67,17 +67,48 @@ function Invoke-Api {
     }
 
     try {
-        $resp = Invoke-WebRequest @params -SkipHttpErrorCheck
+        # 注意：不能用 -SkipHttpErrorCheck（仅 PowerShell 7+ 支持），
+        # 本机宿主是 Windows PowerShell 5.1，因此手动从异常里读回响应体，
+        # 否则 401 的响应体会被吞掉、看起来像"没有统一返回体"。
+        $resp = Invoke-WebRequest @params -UseBasicParsing -ErrorAction Stop
         $json = $null
         try { $json = $resp.Content | ConvertFrom-Json } catch { }
         return [pscustomobject]@{
             Status     = [int]$resp.StatusCode
             Json       = $json
-            Headers    = $resp.Headers
+            Headers    = @{ "X-Trace-Id" = [string]$resp.Headers["X-Trace-Id"] }
             RawContent = $resp.Content
         }
     } catch {
-        return [pscustomobject]@{ Status = -1; Json = $null; Headers = @{}; RawContent = $_.Exception.Message }
+        $errorResponse = $_.Exception.Response
+        if ($null -ne $errorResponse) {
+            $content = ""
+            try {
+                $stream = $errorResponse.GetResponseStream()
+                if ($null -ne $stream) {
+                    $reader = New-Object System.IO.StreamReader($stream)
+                    $content = $reader.ReadToEnd()
+                    $reader.Dispose()
+                }
+            } catch { }
+            $json = $null
+            try { $json = $content | ConvertFrom-Json } catch { }
+            $trace = ""
+            try { $trace = [string]$errorResponse.Headers["X-Trace-Id"] } catch { }
+            return [pscustomobject]@{
+                Status     = [int]$errorResponse.StatusCode
+                Json       = $json
+                Headers    = @{ "X-Trace-Id" = $trace }
+                RawContent = $content
+            }
+        }
+        return [pscustomobject]@{
+            Status     = -1
+            Json       = $null
+            Headers    = @{ "X-Trace-Id" = "" }
+            RawContent = $_.Exception.Message
+            Error      = $_.Exception.GetType().FullName + ": " + $_.Exception.Message
+        }
     }
 }
 
@@ -90,6 +121,9 @@ Write-Host "================================================================" -F
 # ------------------------------------------------------------------ A
 Write-Step "A. health check"
 $health = Invoke-Api -Method GET -Path "/health"
+if ($health.PSObject.Properties.Name -contains "Error") {
+    Write-Host "  transport error: $($health.Error)" -ForegroundColor Yellow
+}
 Assert-True ($health.Status -eq 200) "GET /health returns 200" "actual: $($health.Status)"
 Assert-True ($health.Json.code -eq 200) "body.code = 200" "data.status = $($health.Json.data.status)"
 $traceHeader = $health.Headers["X-Trace-Id"]
