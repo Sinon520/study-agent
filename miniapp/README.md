@@ -83,12 +83,24 @@ pnpm 10+ 默认**不执行**依赖的 postinstall。`esbuild` 与 `core-js` 的 
 解决：`pnpm approve-builds --all` 生成 `pnpm-workspace.yaml` 里的 `allowBuilds`。
 **注意 `package.json` 里的 `"pnpm"` 字段在 pnpm 11 起已不再被读取**（会在日志里警告并忽略）。
 
-### 2. 小程序端拿不到 SSE 流
+### 2. 小程序端 SSE 流式：uni.request 不支持 enableChunked（已修复）
 
-`uni.request` 默认不支持流式读取，所以 `pages/chat/chat.vue` 里用的是
-`enableChunked: true` + `onChunkReceived` 手动解析 SSE 帧。这条路径**要等第 3 周
-后端 `/chat/ask` 就绪后才能真正验证**；如果验证不通过，按降级预案把小程序问答页
-改为"一次性返回"（`enableChunked` 置 false，等完整响应后一次渲染）。
+**实测结论**：`uni.request` 无论怎么传 `enableChunked` 都不会生效 ——
+`@dcloudio` 框架包里根本没有这个参数的实现（全量 grep 验证过），
+分块数据收不到、还不报错，表现是**发问后什么都不显示**（答案静默丢失）。
+
+**正确做法**（`pages/chat/chat.vue` 已按要求实现）：
+
+1. **MP-WEIXIN 下用原生 `wx.request`**（`enableChunked: true` +
+   `onChunkReceived`），配合 `#ifdef` 条件编译与其它端区分；
+2. **必须有"整包兜底"**：分块通道没拿到数据时，用 success 回调里的完整响应体
+   走同一套 SSE 帧解析，退化为一次性显示 —— 不能只依赖分块这一条路；
+3. 非 SSE 响应（Java 在开流前返回的 401/500 JSON 错误体）要解析出 msg 直接展示；
+4. `TextDecoder` 在部分运行环境不存在，代码里有手写 UTF-8 解码兜底；
+5. 请求超时放宽到 120s：首次提问可能触发本地向量模型冷启动（实测 82s）。
+
+**经验**：框架"看起来支持"的能力要落到依赖包里验证（grep 一下参数名）；
+传输层能力的缺失往往不报错，只是静默丢数据。
 
 ## 与后端的接口对应
 

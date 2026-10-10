@@ -50,6 +50,45 @@
 <script>
 import { getToken } from '@/utils/request'
 
+/**
+ * 手写 UTF-8 解码：部分小程序运行环境没有 TextDecoder，
+ * 而分块接收拿到的都是 ArrayBuffer，没有解码器就全是乱码/丢失。
+ * 只处理完整序列，非法字节替换为 U+FFFD。
+ */
+function utf8Decode(bytes) {
+  let out = ''
+  let i = 0
+  const len = bytes.length
+  while (i < len) {
+    const b = bytes[i]
+    if (b < 0x80) {
+      out += String.fromCharCode(b)
+      i += 1
+    } else if (b >= 0xc0 && b < 0xe0 && i + 1 < len) {
+      out += String.fromCharCode(((b & 0x1f) << 6) | (bytes[i + 1] & 0x3f))
+      i += 2
+    } else if (b >= 0xe0 && b < 0xf0 && i + 2 < len) {
+      out += String.fromCharCode(
+        ((b & 0x0f) << 12) | ((bytes[i + 1] & 0x3f) << 6) | (bytes[i + 2] & 0x3f)
+      )
+      i += 3
+    } else if (b >= 0xf0 && i + 3 < len) {
+      const cp =
+        ((b & 0x07) << 18) |
+        ((bytes[i + 1] & 0x3f) << 12) |
+        ((bytes[i + 2] & 0x3f) << 6) |
+        (bytes[i + 3] & 0x3f)
+      const u = cp - 0x10000
+      out += String.fromCharCode(0xd800 + (u >> 10), 0xdc00 + (u & 0x3ff))
+      i += 4
+    } else {
+      out += '\uFFFD'
+      i += 1
+    }
+  }
+  return out
+}
+
 export default {
   data() {
     return {
@@ -63,10 +102,15 @@ export default {
     /**
      * 流式问答。
      *
-     * 小程序端没有 fetch/ReadableStream，uni.request 也不支持流式读取，
-     * 所以第 3 周这里要换成：wx.request 的 enableChunked: true + onChunkReceived，
-     * 或者退化为"一次性返回"（降级预案里小程序问答页可以被砍）。
-     * 现在先把交互与数据结构做出来，接后端时只改这一个方法。
+     * 三个实测出来的关键点（都踩过）：
+     * 1. **uni.request 不支持 enableChunked** —— @dcloudio 框架包里根本没有这个参数
+     *    （全量 grep 验证过：传进去会被忽略，返回的 task 上也没有 onChunkReceived），
+     *    分块数据永远收不到、还不报错 → 答案静默丢失。所以 MP-WEIXIN 下必须
+     *    用原生 `wx.request` 才能开启分块接收。
+     * 2. **必须有"整包兜底"**：即使分块不可用（老基础库 / 其它端），
+     *    success 回调里也要能拿完整响应体走同一套帧解析，退化为一次性显示 ——
+     *    否则就会出现"发了问题但气泡里什么都没有"。
+     * 3. TextDecoder 在部分小程序环境不存在，准备了手写 UTF-8 解码兜底。
      */
     async onSend() {
       const question = this.input.trim()
@@ -76,54 +120,100 @@ export default {
       this.input = ''
       this.scrollToBottom()
 
-      const reply = { role: 'assistant', content: '', reasoning: '', citations: [] }
+      const reply = { role: 'assistant', content: '', reasoning: '', citations: [], error: '' }
       this.messages.push(reply)
       this.streaming = true
 
-      try {
-        const token = getToken()
-        // 小程序端请求：enableChunked 打开后可以在 onChunkReceived 里增量读取 SSE
-        const task = uni.request({
-          url: 'http://127.0.0.1:8080/chat/ask',
-          method: 'POST',
-          enableChunked: true,
-          header: {
-            'Content-Type': 'application/json',
-            ...(token ? { Authorization: `Bearer ${token}` } : {}),
-          },
-          data: { question },
-          success: () => {
-            this.streaming = false
-          },
-          fail: () => {
-            this.streaming = false
-            uni.showToast({ title: '问答服务未就绪', icon: 'none' })
-            reply.content = '第 3 周接入 RAG 问答后，这里会显示基于你资料的回答。'
-          },
-        })
-
-        if (task && task.onChunkReceived) {
-          const decoder = new TextDecoder('utf-8')
-          let buffer = ''
-          task.onChunkReceived((res) => {
-            buffer += decoder.decode(new Uint8Array(res.data), { stream: true })
-            let index = buffer.indexOf('\n\n')
-            while (index !== -1) {
-              const frame = buffer.slice(0, index)
-              buffer = buffer.slice(index + 2)
-              this.handleFrame(frame, reply)
-              index = buffer.indexOf('\n\n')
-            }
-          })
-        }
-      } catch (e) {
-        this.streaming = false
-      } finally {
-        // 兜底：15 秒后强制结束 loading，避免请求悬挂后按钮一直禁用
-        setTimeout(() => {
-          this.streaming = false
-        }, 15000)
+      const token = getToken()
+      const url = 'http://127.0.0.1:8080/chat/ask'
+      const header = {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
       }
+
+      // 分块解码：优先 TextDecoder 流式解码；没有它就攒原始字节、结束时整体解码
+      const hasTextDecoder = typeof TextDecoder !== 'undefined'
+      const decoder = hasTextDecoder ? new TextDecoder('utf-8') : null
+      let buffer = ''
+      const rawChunks = []
+
+      const consumeFrames = () => {
+        let index = buffer.indexOf('\n\n')
+        while (index !== -1) {
+          const frame = buffer.slice(0, index)
+          buffer = buffer.slice(index + 2)
+          this.handleFrame(frame, reply)
+          index = buffer.indexOf('\n\n')
+        }
+      }
+
+      const onChunk = (chunkData) => {
+        if (!chunkData) return
+        const bytes = new Uint8Array(chunkData)
+        if (decoder) {
+          buffer += decoder.decode(bytes, { stream: true })
+          consumeFrames()
+        } else {
+          rawChunks.push(bytes)
+        }
+        this.scrollToBottom()
+      }
+
+      // 请求收尾（成功/失败都走这里）：处理分块残留；分块通道没拿到东西就用整包兜底
+      const settle = (fallbackText) => {
+        if (decoder) {
+          buffer += decoder.decode()
+          consumeFrames()
+        }
+        if (!reply.content && !reply.reasoning && !reply.error) {
+          const text = fallbackText || (rawChunks.length ? this.decodeBytes(rawChunks) : '')
+          if (text && text.trim()) {
+            this.parseSseText(text, reply)
+          }
+        }
+        if (!reply.content && !reply.reasoning && !reply.error) {
+          reply.content = '没有收到回答：请确认已登录、开发者工具勾选了「不校验合法域名」，且后端 8080 正在运行。'
+        }
+        this.streaming = false
+        this.scrollToBottom()
+      }
+
+      const onFail = (err) => {
+        const msg = (err && err.errMsg) || '网络错误'
+        reply.error = msg
+        reply.content = /domain|url not in/i.test(msg)
+          ? '请求被域名校验拦截：请到开发者工具「详情 → 本地设置」勾选「不校验合法域名…」后重试。'
+          : `请求失败：${msg}（请确认后端 8080 正在运行）`
+        settle('')
+      }
+
+      // #ifdef MP-WEIXIN
+      const task = wx.request({
+        url,
+        method: 'POST',
+        enableChunked: true, // 微信原生能力：分块接收（uni.request 不透传，必须原生调）
+        timeout: 120000, // 首答可能触发本地向量模型冷启动（实测曾到 82 秒）
+        header,
+        data: { question },
+        success: (res) => settle(this.decodeAny(res.data)),
+        fail: onFail,
+      })
+      if (task && typeof task.onChunkReceived === 'function') {
+        task.onChunkReceived((res) => onChunk(res.data))
+      }
+      // #endif
+
+      // #ifndef MP-WEIXIN
+      uni.request({
+        url,
+        method: 'POST',
+        timeout: 120000,
+        header,
+        data: { question },
+        success: (res) => settle(this.decodeAny(res.data)),
+        fail: onFail,
+      })
+      // #endif
     },
 
     handleFrame(frame, reply) {
@@ -152,6 +242,50 @@ export default {
         reply.content += parsed.text || ''
       }
       this.scrollToBottom()
+    },
+
+    /**
+     * 整包兜底解析：分块通道没拿到数据时，用完整响应体走同一套帧解析。
+     * 内容不是 SSE（没有 event:/data: 行）时按 JSON 错误体处理 ——
+     * Java 在开流前返回的 401/500 就是这种形态，直接展示 msg 比静默强。
+     */
+    parseSseText(text, reply) {
+      const body = (text || '').trim()
+      if (!body) return
+      if (body.indexOf('event:') === -1 && body.indexOf('data:') === -1) {
+        try {
+          const obj = JSON.parse(body)
+          reply.content = `请求失败：${obj.msg || obj.message || '未知错误'}`
+        } catch (e) {
+          reply.content = `请求失败：${body.slice(0, 200)}`
+        }
+        return
+      }
+      body.split('\n\n').forEach((frame) => {
+        if (frame.trim()) this.handleFrame(frame, reply)
+      })
+    },
+
+    /** 合并若干 Uint8Array 后整体 UTF-8 解码（无 TextDecoder 环境的兜底） */
+    decodeBytes(chunks) {
+      let total = 0
+      chunks.forEach((c) => {
+        total += c.length
+      })
+      const merged = new Uint8Array(total)
+      let offset = 0
+      chunks.forEach((c) => {
+        merged.set(c, offset)
+        offset += c.length
+      })
+      return utf8Decode(merged)
+    },
+
+    decodeAny(data) {
+      if (typeof data === 'string') return data
+      if (data instanceof ArrayBuffer) return utf8Decode(new Uint8Array(data))
+      if (data && data.buffer instanceof ArrayBuffer) return utf8Decode(new Uint8Array(data.buffer))
+      return ''
     },
 
     scrollToBottom() {
