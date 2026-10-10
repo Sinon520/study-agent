@@ -1,0 +1,23 @@
+# 统一换行符，避免 Windows 与 Linux 之间来回转换导致的整文件 diff
+* text=auto eol=lf
+
+# Windows 批处理必须是 CRLF，否则 cmd 解析可能出错
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制文件不做任何转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.docx binary
+*.xlsx binary
+*.jar binary
+*.woff binary
+*.woff2 binary
+
+# 模型与第三方产物不参与 diff/导出
+*.db binary
+*.sqlite binary

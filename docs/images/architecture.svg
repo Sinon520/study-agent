@@ -1,0 +1,144 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="720" viewBox="0 0 1180 720" font-family="Microsoft YaHei, PingFang SC, Helvetica, Arial, sans-serif">
+  <defs>
+    <linearGradient id="gJava" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#e8f0fe"/><stop offset="100%" stop-color="#d2e3fc"/>
+    </linearGradient>
+    <linearGradient id="gPy" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#e6f4ea"/><stop offset="100%" stop-color="#ceead6"/>
+    </linearGradient>
+    <linearGradient id="gFe" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#fef7e0"/><stop offset="100%" stop-color="#feefc3"/>
+    </linearGradient>
+    <linearGradient id="gMw" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#f3e8fd"/><stop offset="100%" stop-color="#e9d8fd"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#5f6368"/>
+    </marker>
+    <marker id="arrowBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#1a73e8"/>
+    </marker>
+    <marker id="arrowGreen" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#137333"/>
+    </marker>
+  </defs>
+
+  <rect width="1180" height="720" fill="#fbfbfd"/>
+  <text x="590" y="38" text-anchor="middle" font-size="22" font-weight="700" fill="#202124">备考学习 Agent 系统 · 整体架构</text>
+  <text x="590" y="62" text-anchor="middle" font-size="13" fill="#5f6368">Java 做业务工程化（唯一写入口 / 权限入口），Python 做 AI 能力（内网调用，不持有业务写权限）</text>
+
+  <!-- ================= 客户端层 ================= -->
+  <rect x="40" y="92" width="1100" height="104" rx="10" fill="#ffffff" stroke="#dadce0"/>
+  <text x="58" y="116" font-size="13" font-weight="700" fill="#5f6368">客户端层</text>
+
+  <rect x="70" y="128" width="300" height="50" rx="8" fill="url(#gFe)" stroke="#f9ab00"/>
+  <text x="220" y="150" text-anchor="middle" font-size="14" font-weight="600" fill="#202124">Vue 3 PC 端</text>
+  <text x="220" y="168" text-anchor="middle" font-size="11" fill="#5f6368">Element Plus · Pinia · ECharts · markdown-it</text>
+
+  <rect x="440" y="128" width="300" height="50" rx="8" fill="url(#gFe)" stroke="#f9ab00"/>
+  <text x="590" y="150" text-anchor="middle" font-size="14" font-weight="600" fill="#202124">UniApp 小程序</text>
+  <text x="590" y="168" text-anchor="middle" font-size="11" fill="#5f6368">今日计划 · 错题列表 · 我的 · 订阅消息</text>
+
+  <rect x="810" y="128" width="300" height="50" rx="8" fill="#f1f3f4" stroke="#bdc1c6"/>
+  <text x="960" y="150" text-anchor="middle" font-size="14" font-weight="600" fill="#202124">Swagger / Postman</text>
+  <text x="960" y="168" text-anchor="middle" font-size="11" fill="#5f6368">接口自测与联调</text>
+
+  <!-- ================= 网关/入口 ================= -->
+  <rect x="40" y="222" width="1100" height="66" rx="10" fill="#ffffff" stroke="#dadce0"/>
+  <text x="58" y="246" font-size="13" font-weight="700" fill="#5f6368">接入层</text>
+  <rect x="70" y="252" width="1040" height="28" rx="6" fill="#e8eaed" stroke="#bdc1c6"/>
+  <text x="590" y="271" text-anchor="middle" font-size="12" fill="#202124">Nginx（静态资源 + /api 反向代理） → Spring Security JWT 过滤器链 → 白名单 / 鉴权 / userId 入上下文 → X-Trace-Id 生成与透传</text>
+
+  <!-- 客户端 -> 接入层 -->
+  <line x1="220" y1="196" x2="220" y2="222" stroke="#5f6368" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="590" y1="196" x2="590" y2="222" stroke="#5f6368" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="960" y1="196" x2="960" y2="222" stroke="#5f6368" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- ================= 服务层 ================= -->
+  <rect x="40" y="314" width="530" height="248" rx="10" fill="url(#gJava)" stroke="#1a73e8" stroke-width="1.6"/>
+  <text x="60" y="340" font-size="15" font-weight="700" fill="#174ea6">Java 业务服务 · Spring Boot 3 · :8080</text>
+  <text x="60" y="360" font-size="11" fill="#1967d2">职责：鉴权 / 事务 / 业务规则 / 消息生产消费 / 唯一写入口</text>
+
+  <rect x="62" y="374" width="240" height="34" rx="6" fill="#ffffff" stroke="#8ab4f8"/>
+  <text x="182" y="396" text-anchor="middle" font-size="12" fill="#202124">认证模块 JWT + wx-login</text>
+  <rect x="314" y="374" width="240" height="34" rx="6" fill="#ffffff" stroke="#8ab4f8"/>
+  <text x="434" y="396" text-anchor="middle" font-size="12" fill="#202124">计划 / 任务模块</text>
+
+  <rect x="62" y="416" width="240" height="34" rx="6" fill="#ffffff" stroke="#8ab4f8"/>
+  <text x="182" y="438" text-anchor="middle" font-size="12" fill="#202124">错题本 + 标签 + Excel 导出</text>
+  <rect x="314" y="416" width="240" height="34" rx="6" fill="#ffffff" stroke="#8ab4f8"/>
+  <text x="434" y="438" text-anchor="middle" font-size="12" fill="#202124">进度统计 / 报告</text>
+
+  <rect x="62" y="458" width="240" height="34" rx="6" fill="#ffffff" stroke="#8ab4f8"/>
+  <text x="182" y="480" text-anchor="middle" font-size="12" fill="#202124">知识库上传 / 文档管理</text>
+  <rect x="314" y="458" width="240" height="34" rx="6" fill="#ffffff" stroke="#8ab4f8"/>
+  <text x="434" y="480" text-anchor="middle" font-size="12" fill="#202124">问答会话 / SSE 透传</text>
+
+  <rect x="62" y="500" width="492" height="48" rx="6" fill="#d2e3fc" stroke="#8ab4f8" stroke-dasharray="4 3"/>
+  <text x="308" y="520" text-anchor="middle" font-size="11.5" fill="#174ea6">横切：Result 统一返回 · @RestControllerAdvice 全局异常 · MyBatis-Plus 分页</text>
+  <text x="308" y="538" text-anchor="middle" font-size="11.5" fill="#174ea6">Logback + MDC traceId · Redis 缓存（Cache Aside）</text>
+
+  <!-- 接入层 -> Java -->
+  <line x1="300" y1="288" x2="300" y2="314" stroke="#1a73e8" stroke-width="2" marker-end="url(#arrowBlue)"/>
+
+  <!-- Java <-> Python -->
+  <rect x="610" y="314" width="530" height="248" rx="10" fill="url(#gPy)" stroke="#137333" stroke-width="1.6"/>
+  <text x="630" y="340" font-size="15" font-weight="700" fill="#0d652d">Python AI 服务 · FastAPI · :8000</text>
+  <text x="630" y="360" font-size="11" fill="#137333">职责：RAG 检索增强 / Agent 编排 / 向量化 / 流式生成（仅内网）</text>
+
+  <rect x="632" y="374" width="240" height="34" rx="6" fill="#ffffff" stroke="#81c995"/>
+  <text x="752" y="396" text-anchor="middle" font-size="12" fill="#202124">/rag/ingest 文档入库</text>
+  <rect x="884" y="374" width="240" height="34" rx="6" fill="#ffffff" stroke="#81c995"/>
+  <text x="1004" y="396" text-anchor="middle" font-size="12" fill="#202124">/rag/chat SSE 问答</text>
+
+  <rect x="632" y="416" width="240" height="34" rx="6" fill="#ffffff" stroke="#81c995"/>
+  <text x="752" y="438" text-anchor="middle" font-size="12" fill="#202124">/plan LangGraph 规划 Agent</text>
+  <rect x="884" y="416" width="240" height="34" rx="6" fill="#ffffff" stroke="#81c995"/>
+  <text x="1004" y="438" text-anchor="middle" font-size="12" fill="#202124">/agent/classify 错题归类</text>
+
+  <rect x="632" y="458" width="492" height="34" rx="6" fill="#ffffff" stroke="#81c995"/>
+  <text x="878" y="480" text-anchor="middle" font-size="12" fill="#202124">/agent/report 复盘报告生成</text>
+
+  <rect x="632" y="500" width="492" height="48" rx="6" fill="#ceead6" stroke="#81c995" stroke-dasharray="4 3"/>
+  <text x="878" y="520" text-anchor="middle" font-size="11.5" fill="#0d652d">LangGraph 三节点：信息补全 → 计划生成（结构化 JSON）→ 校验调整（最多重试 2 次）</text>
+  <text x="878" y="538" text-anchor="middle" font-size="11.5" fill="#0d652d">loguru + traceId 贯穿（读 Java 传来的 X-Trace-Id）</text>
+
+  <!-- Java -> Python 调用 -->
+  <path d="M 572 372 L 610 372" stroke="#137333" stroke-width="2" marker-end="url(#arrowGreen)"/>
+  <text x="591" y="364" text-anchor="middle" font-size="10" fill="#137333">HTTP</text>
+  <!-- Python -> Java 回调 -->
+  <path d="M 610 490 L 572 490" stroke="#137333" stroke-width="2" marker-end="url(#arrowGreen)"/>
+  <text x="591" y="506" text-anchor="middle" font-size="10" fill="#137333">回调</text>
+
+  <!-- ================= 中间件层 ================= -->
+  <rect x="40" y="584" width="1100" height="112" rx="10" fill="#ffffff" stroke="#dadce0"/>
+  <text x="58" y="608" font-size="13" font-weight="700" fill="#5f6368">中间件与存储层</text>
+
+  <rect x="62" y="620" width="252" height="60" rx="8" fill="#e8f0fe" stroke="#8ab4f8"/>
+  <text x="188" y="642" text-anchor="middle" font-size="13" font-weight="600" fill="#174ea6">MySQL 8 · study_agent</text>
+  <text x="188" y="661" text-anchor="middle" font-size="10.5" fill="#5f6368">13 张业务表 · 联合索引 · 慢查询优化</text>
+
+  <rect x="330" y="620" width="252" height="60" rx="8" fill="#fce8e6" stroke="#f28b82"/>
+  <text x="456" y="642" text-anchor="middle" font-size="13" font-weight="600" fill="#a50e0e">Redis</text>
+  <text x="456" y="661" text-anchor="middle" font-size="10.5" fill="#5f6368">会话上下文 · refresh token · 热点缓存</text>
+
+  <rect x="598" y="620" width="252" height="60" rx="8" fill="url(#gMw)" stroke="#b39ddb"/>
+  <text x="724" y="642" text-anchor="middle" font-size="13" font-weight="600" fill="#5b2c91">Milvus Lite</text>
+  <text x="724" y="661" text-anchor="middle" font-size="10.5" fill="#5f6368">kb_chunk collection · 1024 维向量</text>
+
+  <rect x="866" y="620" width="252" height="60" rx="8" fill="#e6f4ea" stroke="#81c995"/>
+  <text x="992" y="642" text-anchor="middle" font-size="13" font-weight="600" fill="#0d652d">RocketMQ 5.5</text>
+  <text x="992" y="661" text-anchor="middle" font-size="10.5" fill="#5f6368">wrong-classify / report-generate / wx-push</text>
+
+  <!-- 服务层 -> 中间件 -->
+  <line x1="180" y1="562" x2="180" y2="620" stroke="#5f6368" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="430" y1="562" x2="430" y2="620" stroke="#5f6368" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="720" y1="562" x2="720" y2="620" stroke="#5f6368" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="1000" y1="562" x2="1000" y2="620" stroke="#5f6368" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- 外部模型 -->
+  <rect x="866" y="292" width="274" height="14" rx="0" fill="none"/>
+  <rect x="884" y="252" width="240" height="30" rx="6" fill="#fef7e0" stroke="#f9ab00"/>
+  <text x="1004" y="272" text-anchor="middle" font-size="11.5" fill="#7a4d00">阿里云百炼 qwen3.7-flash（外部 API）</text>
+
+</svg>
