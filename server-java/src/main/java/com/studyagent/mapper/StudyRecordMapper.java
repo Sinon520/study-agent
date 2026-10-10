@@ -82,4 +82,19 @@ public interface StudyRecordMapper extends BaseMapper<StudyRecord> {
              LIMIT 400
             """)
     List<LocalDate> listStudyDates(@Param("userId") Long userId);
+
+    /**
+     * 周期内有学习记录的用户（周报定时任务的"活跃用户"口径，Day 24）。
+     *
+     * <p>口径说明：以学习记录为准而不是"所有注册用户" —— 没有学习行为的人
+     * 生成一份"本周零学习"的报告既浪费 LLM 调用，对用户也是骚扰。
+     * 后续如果加了任务行为口径（计划完成但没记时长），在这里 union 扩展即可。</p>
+     */
+    @Select("""
+            SELECT DISTINCT user_id
+              FROM study_record
+             WHERE study_date BETWEEN #{start} AND #{end}
+            """)
+    List<Long> listActiveUserIds(@Param("start") LocalDate start,
+                                 @Param("end") LocalDate end);
 }

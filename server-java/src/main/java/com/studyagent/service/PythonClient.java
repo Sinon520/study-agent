@@ -2,6 +2,7 @@ package com.studyagent.service;
 
 import com.studyagent.model.vo.ClassifyResultVO;
 import com.studyagent.model.vo.KbIngestResultVO;
+import com.studyagent.model.vo.ReportResultVO;
 
 /**
  * Python AI 服务的客户端（Java → Python 主动调用）。
@@ -49,4 +50,19 @@ public interface PythonClient {
      * @param subject         学生填写的科目（可为空）
      */
     ClassifyResultVO classify(Long wrongQuestionId, String content, String subject);
+
+    /**
+     * 生成复盘报告（markdown 正文 + 要点 + 建议）。
+     *
+     * <p>由 RocketMQ 消费者（{@code ReportGenerateConsumer}）在收到
+     * {@code report-generate} 消息后调用（Day 24）。统计数据由 Java 侧聚合好后传入，
+     * Python 只负责"把数字变成有洞察的文字"。</p>
+     *
+     * @param userId      用户 ID（透传给 Python 只用于日志串联）
+     * @param periodStart 统计周期开始（yyyy-MM-dd）
+     * @param periodEnd   统计周期结束（yyyy-MM-dd）
+     * @param stats       Java 聚合好的统计数据（时长/完成率/错题/分布）
+     */
+    ReportResultVO generateReport(Long userId, String periodStart, String periodEnd,
+                                  java.util.Map<String, Object> stats);
 }

@@ -7,6 +7,7 @@ import com.studyagent.common.exception.BizException;
 import com.studyagent.config.InternalProperties;
 import com.studyagent.model.vo.ClassifyResultVO;
 import com.studyagent.model.vo.KbIngestResultVO;
+import com.studyagent.model.vo.ReportResultVO;
 import com.studyagent.service.PythonClient;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -124,6 +125,39 @@ public class PythonClientImpl implements PythonClient {
         }
         JsonNode difficulty = root.path("difficulty");
         vo.setDifficulty(difficulty.isNumber() ? difficulty.asInt() : null);
+        return vo;
+    }
+
+    @Override
+    public ReportResultVO generateReport(Long userId, String periodStart, String periodEnd,
+                                         Map<String, Object> stats) {
+        Map<String, Object> body = new java.util.HashMap<>();
+        body.put("userId", userId);
+        body.put("periodStart", periodStart);
+        body.put("periodEnd", periodEnd);
+        body.put("stats", stats == null ? Map.of() : stats);
+
+        JsonNode root = post("/agent/report", body, "生成复盘报告");
+        ReportResultVO vo = new ReportResultVO();
+        vo.setContent(root.path("content").asText(""));
+        JsonNode highlights = root.path("highlights");
+        if (highlights.isArray()) {
+            highlights.forEach(node -> {
+                String text = node.asText("");
+                if (!text.isBlank()) {
+                    vo.getHighlights().add(text);
+                }
+            });
+        }
+        JsonNode suggestions = root.path("suggestions");
+        if (suggestions.isArray()) {
+            suggestions.forEach(node -> {
+                String text = node.asText("");
+                if (!text.isBlank()) {
+                    vo.getSuggestions().add(text);
+                }
+            });
+        }
         return vo;
     }
 

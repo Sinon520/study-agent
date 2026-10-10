@@ -185,7 +185,9 @@ CREATE TABLE `review_report` (
   `stats_json`   json        DEFAULT NULL            COMMENT '统计数据 JSON（完成率/时长/错题趋势）',
   `create_time`  datetime    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   PRIMARY KEY (`id`),
-  KEY `idx_user_period` (`user_id`, `period_start`, `period_end`)
+  -- 一个用户同一周期只保留一份报告：MQ 至少一次投递（重试/重投/手动重复触发）
+  -- 下靠唯一键兜底幂等，代码里的"先查后写"只是快速路径（踩坑 #20 的教训）
+  UNIQUE KEY `uk_user_period` (`user_id`, `report_type`, `period_start`, `period_end`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT = '复盘报告表';
 
 -- ---------------------------------------------------------------------

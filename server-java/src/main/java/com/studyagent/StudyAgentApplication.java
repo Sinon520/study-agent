@@ -5,13 +5,16 @@ import org.mybatis.spring.annotation.MapperScan;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.core.env.Environment;
+import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
  * 备考学习 Agent —— Java 业务主栈启动类。
  * <p>{@code @MapperScan} 只在这里声明一次（配置类中不再重复）。</p>
+ * <p>{@code @EnableScheduling}：周报定时任务（Day 24）、后续的学习提醒（Day 25~26）用。</p>
  */
 @Slf4j
 @SpringBootApplication
+@EnableScheduling
 @MapperScan("com.studyagent.mapper")
 public class StudyAgentApplication {
 

@@ -134,6 +134,17 @@ wx:
   appid: wx_test_appid
   secret: wx_test_secret
 
+# ==================== 复盘报告（Day 24） ====================
+report:
+  # 周报定时触发：每周日 20:00（Spring cron：秒 分 时 日 月 周）
+  cron: "${REPORT_CRON:0 0 20 * * SUN}"
+  # 本地调试不想被定时打搅时置 false（手动触发接口不受影响）
+  scheduler-enabled: true
+  # 微信订阅消息模板 ID（Day 25~26 申请真实模板后经环境变量注入）
+  wx-template-id: "${WX_REPORT_TEMPLATE_ID:wx-template-report-placeholder}"
+  # 手动触发允许的最大统计跨度（天）
+  max-period-days: 31
+
 # ==================== 应用自定义配置 ====================
 app:
   upload-dir: ./uploads
