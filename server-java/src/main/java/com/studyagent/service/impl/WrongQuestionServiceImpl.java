@@ -15,13 +15,19 @@ import com.studyagent.model.dto.WrongQuestionRequest;
 import com.studyagent.model.vo.PageResult;
 import com.studyagent.model.vo.WrongQuestionExportVO;
 import com.studyagent.model.vo.WrongQuestionVO;
+import com.studyagent.mq.MessagePublisher;
+import com.studyagent.mq.MqTopics;
+import com.studyagent.mq.message.WrongClassifyMessage;
 import com.studyagent.service.WrongQuestionService;
 import com.studyagent.service.WrongQuestionTagRelService;
 import com.studyagent.service.WrongQuestionTagService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
@@ -31,6 +37,8 @@ import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * 错题 业务实现。
@@ -60,6 +68,7 @@ public class WrongQuestionServiceImpl extends ServiceImpl<WrongQuestionMapper, W
     private final WrongQuestionTagService tagService;
     private final WrongQuestionTagRelService tagRelService;
     private final WrongQuestionTagMapper tagMapper;
+    private final MessagePublisher messagePublisher;
 
     // ------------------------------------------------------------------ 查询
 
@@ -181,6 +190,9 @@ public class WrongQuestionServiceImpl extends ServiceImpl<WrongQuestionMapper, W
         replaceTags(userId, question.getId(), request.getTags());
         log.info("新增错题 id={} userId={} subject={}", question.getId(), userId, question.getSubject());
 
+        // 异步归类（AI 打标签）：事务提交后再发消息，详见 publishClassifyAfterCommit 的注释
+        publishClassifyAfterCommit(question);
+
         return getDetail(userId, question.getId());
     }
 
@@ -286,39 +298,17 @@ public class WrongQuestionServiceImpl extends ServiceImpl<WrongQuestionMapper, W
         if (tagNames == null || tagNames.isEmpty()) {
             return;
         }
-        List<String> names = tagNames.stream()
-                .filter(StringUtils::hasText)
-                .map(String::trim)
-                .distinct()
-                .limit(20)      // 单题标签数上限，防止前端刷出几百个标签
-                .toList();
+        List<String> names = normalizeTagNames(tagNames);
         if (names.isEmpty()) {
             return;
         }
 
-        Map<String, Long> existing = new HashMap<>();
-        for (WrongQuestionTag tag : tagMapper.selectByNames(userId, names)) {
-            existing.put(tag.getName(), tag.getId());
-        }
-
+        Map<String, Long> tagIds = ensureTagIds(userId, names);
         List<WrongQuestionTagRel> rels = new ArrayList<>(names.size());
         for (String name : names) {
-            Long tagId = existing.get(name);
+            Long tagId = tagIds.get(name);
             if (tagId == null) {
-                WrongQuestionTag tag = new WrongQuestionTag();
-                tag.setUserId(userId);
-                tag.setName(name);
-                try {
-                    tagService.save(tag);
-                } catch (org.springframework.dao.DuplicateKeyException e) {
-                    // 并发下另一个请求刚建了同名标签，查回来即可
-                    List<WrongQuestionTag> again = tagMapper.selectByNames(userId, List.of(name));
-                    if (again.isEmpty()) {
-                        continue;
-                    }
-                    tag = again.get(0);
-                }
-                tagId = tag.getId();
+                continue;
             }
             WrongQuestionTagRel rel = new WrongQuestionTagRel();
             rel.setWrongQuestionId(questionId);
@@ -328,6 +318,132 @@ public class WrongQuestionServiceImpl extends ServiceImpl<WrongQuestionMapper, W
         if (!rels.isEmpty()) {
             // 唯一键 uk_question_tag 让重复插入无害（幂等）
             tagRelService.saveBatch(rels, 100);
+        }
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public int appendTags(Long userId, Long questionId, List<String> tagNames) {
+        if (tagNames == null || tagNames.isEmpty()) {
+            return 0;
+        }
+        List<String> names = normalizeTagNames(tagNames);
+        if (names.isEmpty()) {
+            return 0;
+        }
+
+        Map<String, Long> tagIds = ensureTagIds(userId, names);
+
+        // 幂等：MQ 至少一次投递，重复消费/重试都可能再跑一遍 ——
+        // 先查已有关系、只插缺的；唯一键 uk_question_tag 作最终兜底
+        Set<Long> linked = tagRelService.list(Wrappers.<WrongQuestionTagRel>lambdaQuery()
+                        .eq(WrongQuestionTagRel::getWrongQuestionId, questionId))
+                .stream()
+                .map(WrongQuestionTagRel::getTagId)
+                .collect(Collectors.toSet());
+
+        List<WrongQuestionTagRel> rels = tagIds.values().stream()
+                .filter(tagId -> !linked.contains(tagId))
+                .map(tagId -> {
+                    WrongQuestionTagRel rel = new WrongQuestionTagRel();
+                    rel.setWrongQuestionId(questionId);
+                    rel.setTagId(tagId);
+                    return rel;
+                })
+                .toList();
+        if (rels.isEmpty()) {
+            return 0;
+        }
+        try {
+            tagRelService.saveBatch(rels, 100);
+        } catch (DuplicateKeyException e) {
+            // 并发（如重复消费的两条消息同时进来）：对方先插成功，本次忽略即可
+            log.warn("标签关系并发重复，已忽略 questionId={}", questionId);
+            return 0;
+        }
+        return rels.size();
+    }
+
+    /** 标签名清洗：去空、去重、单题上限 20 个（防止前端刷出几百个标签） */
+    private List<String> normalizeTagNames(List<String> tagNames) {
+        return tagNames.stream()
+                .filter(StringUtils::hasText)
+                .map(String::trim)
+                .distinct()
+                .limit(20)
+                .toList();
+    }
+
+    /**
+     * 确保一组标签存在（不存在则创建），返回 {@code name -> tagId}。
+     *
+     * <p>并发下用唯一键 {@code uk_user_name} 兜底：插入撞键时把已有记录查回来，
+     * 而不是让整个事务失败（和用户手输标签走的是同一条路）。</p>
+     */
+    private Map<String, Long> ensureTagIds(Long userId, List<String> names) {
+        Map<String, Long> existing = new HashMap<>();
+        for (WrongQuestionTag tag : tagMapper.selectByNames(userId, names)) {
+            existing.put(tag.getName(), tag.getId());
+        }
+        for (String name : names) {
+            if (existing.containsKey(name)) {
+                continue;
+            }
+            WrongQuestionTag tag = new WrongQuestionTag();
+            tag.setUserId(userId);
+            tag.setName(name);
+            try {
+                tagService.save(tag);
+            } catch (DuplicateKeyException e) {
+                // 并发下另一个请求刚建了同名标签，查回来即可
+                List<WrongQuestionTag> again = tagMapper.selectByNames(userId, List.of(name));
+                if (again.isEmpty()) {
+                    continue;
+                }
+                tag = again.get(0);
+            }
+            existing.put(name, tag.getId());
+        }
+        return existing;
+    }
+
+    /**
+     * 事务提交后再发"错题归类"消息（Day 23）。
+     *
+     * <h3>为什么必须等提交后</h3>
+     * 消息一发出去，消费者就可能立刻拿 wrongQuestionId 回查数据库 ——
+     * 如果此时本事务还没提交，消费者查不到这条错题，归类直接丢失。
+     * 用 {@link TransactionSynchronization#afterCommit()} 把发送挂到提交之后；
+     * 非事务环境（如单测直调）则即时发送。
+     *
+     * <h3>失败语义：宁丢标注，不丢错题</h3>
+     * 发送失败（Broker 挂了等）只告警不抛异常 —— 错题本的核心价值是"把题记下来"，
+     * 自动打标是锦上添花，不能因为 MQ 不可用导致用户存不了错题。
+     * 代价是这条链路从"至少一次"退化为"至多一次"；要严格保证应上
+     * RocketMQ 事务消息（半消息）或本地消息表 + 定时补投 ——
+     * 个人项目里"漏标可重存/可手动补"更划算，取舍写在这里供面试展开。
+     */
+    private void publishClassifyAfterCommit(WrongQuestion question) {
+        Runnable publish = () -> {
+            try {
+                messagePublisher.send(MqTopics.WRONG_CLASSIFY, new WrongClassifyMessage(
+                        question.getId(), question.getContent(), question.getSubject(),
+                        MessagePublisher.currentTraceId()));
+            } catch (Exception e) {
+                log.warn("发送错题归类消息失败 wrongQuestionId={}（不影响错题保存）: {}",
+                        question.getId(), e.getMessage());
+            }
+        };
+
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    publish.run();
+                }
+            });
+        } else {
+            publish.run();
         }
     }
 

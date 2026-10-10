@@ -1,11 +1,13 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""第 4 周冒烟：RocketMQ 收发链路（Day 22）。
+"""第 4 周冒烟：RocketMQ 收发链路（Day 22~23）。
 
 验证范围：
   A. 内部接口保护（/internal/** 无令牌 403、错令牌 403）
   B. MQ 环回自检：发消息 → 本进程消费者回执 → 载荷回显一致（producer→consumer 全链路）
   C. 连续多次自检稳定（消息不丢、不漏、不串）
+  D. 错题异步归类端到端（Day 23）：新增错题 → MQ → Python /agent/classify
+     → 回写标签关系 → 轮询到自动标签；并验证重复消费幂等（标签不重复）
 
 用法（需先启动 Java 8080 与 RocketMQ NameServer+Broker）：
     python scripts/smoke_week4_mq.py
@@ -17,6 +19,7 @@ import argparse
 import json
 import pathlib
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -44,14 +47,15 @@ def check(cond: bool, desc: str, detail: str = "") -> None:
         print(f"         {detail}")
 
 
-def call(base: str, method: str, path: str, token: str | None = None,
+def call(base: str, method: str, path: str, body=None, token: str | None = None,
          internal: str | None = None, timeout: int = 60):
+    data = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None
     headers = {"Content-Type": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
     if internal:
         headers["X-Internal-Token"] = internal
-    req = urllib.request.Request(base + path, headers=headers, method=method)
+    req = urllib.request.Request(base + path, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8")
@@ -78,7 +82,7 @@ def main() -> int:
     java, token = args.java, args.internal_token
 
     print("=" * 64)
-    print(" 第 4 周冒烟：RocketMQ 收发链路（Day 22）")
+    print(" 第 4 周冒烟：RocketMQ 收发链路（Day 22~23）")
     print(f" Java = {java}")
     print(f" NameServer = 127.0.0.1:9876   Broker = 127.0.0.1:10911")
     print("=" * 64)
@@ -119,6 +123,63 @@ def main() -> int:
             ok_count += 1
     check(ok_count == 3, "3 次连续自检全部环回成功（消息不丢不串）",
           f"成功 {ok_count}/3")
+
+    # ---------------------------------------------------------- 错题异步归类
+    print()
+    print("--- D. 错题异步归类端到端（Day 23）---")
+    status, body, _ = call(java, "POST", "/auth/login", {"username": "demo", "password": "123456"})
+    jwt = ((body or {}).get("data") or {}).get("accessToken")
+    check(bool(jwt), "demo 登录成功")
+
+    question_id = None
+    if jwt:
+        status, body, _ = call(java, "POST", "/wrong-question", {
+            "subject": "数学", "questionType": "解答",
+            "content": "求由曲线 y = x² 与直线 x = 1、x 轴围成的平面图形的面积（定积分求面积）。",
+            "answer": "1/3", "analysis": "用定积分求平面图形面积：先画草图确定积分上下限 0 到 1，"
+                                          "再算 ∫₀¹ x² dx = 1/3",
+            "difficulty": 3, "mastery": "未掌握", "source": "冒烟测试",
+        }, token=jwt)
+        question_id = ((body or {}).get("data") or {}).get("id")
+        check((body or {}).get("code") == 200 and bool(question_id),
+              "新增错题成功（提交时不带任何标签）", f"wrongQuestionId={question_id}")
+
+    tags: list[str] = []
+    if question_id:
+        deadline = time.time() + 90
+        while time.time() < deadline:
+            status, body, _ = call(java, "GET", f"/wrong-question/{question_id}", token=jwt)
+            tags = ((body or {}).get("data") or {}).get("tags") or []
+            if tags:
+                break
+            time.sleep(3)
+
+    check(bool(tags), "AI 自动打标已回写（轮询到标签出现）", f"tags={tags}")
+    if tags:
+        check(any(("积分" in t) or ("面积" in t) for t in tags),
+              "自动标签命中题干知识点（定积分/面积）", f"tags={tags}")
+        # Python 侧会过滤"与科目重复的泛标签"，所以标签里不应出现「数学」
+        check(all(t != "数学" for t in tags), "自动标签没有与科目重复的泛标签", f"tags={tags}")
+
+        # 错题页的标签筛选能按自动标签查到（闭环到 UI 的筛选功能）
+        from urllib.parse import quote
+        status, body, _ = call(java, "GET",
+                               f"/wrong-question/page?pageNum=1&pageSize=10&tags={quote(tags[0])}",
+                               token=jwt)
+        records = ((body or {}).get("data") or {}).get("records") or []
+        check(any(r.get("id") == question_id for r in records),
+              "按自动标签筛选能查到该错题（筛选闭环）",
+              f"tag={tags[0]} 命中 {len(records)} 条")
+
+        # 幂等：等几秒再读一次，标签不应重复/增长出重复项
+        time.sleep(6)
+        status, body, _ = call(java, "GET", f"/wrong-question/{question_id}", token=jwt)
+        tags2 = ((body or {}).get("data") or {}).get("tags") or []
+        check(len(tags2) == len(set(tags2)), "标签无重复（重复消费幂等）", f"tags={tags2}")
+
+    if question_id:
+        status, body, _ = call(java, "DELETE", f"/wrong-question/{question_id}", token=jwt)
+        check((body or {}).get("code") == 200, "清理测试错题", f"id={question_id}")
 
     total = PASS + FAIL
     print()

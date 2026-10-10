@@ -194,6 +194,7 @@ python scripts/verify_week2.py            # 计划/错题/进度/通知 + 越权
 python scripts/verify_week3_rag.py        # RAG 端到端（上传→入库→流式问答→引用溯源），31 项
 python scripts/verify_week3_hardening.py  # 并发 / 断连 / 长文档 / 空检索，32 项
 python scripts/smoke_week3.py             # 内部接口安全 / Agent 落库 / 问答降级路径
+python scripts/smoke_week4_mq.py          # RocketMQ 收发环回 + 错题异步归类端到端
 python scripts/test_kb_upload.py          # 资料上传边界（非法类型 / 越权 / 失败态可读）
 ```
 
@@ -205,7 +206,7 @@ python scripts/test_kb_upload.py          # 资料上传边界（非法类型 / 
 | 第 1 周 | 中间件 + 表设计 + 双工程骨架 + 登录       | ✅ 完成（40/40 验收通过，tag `week1`） |
 | 第 2 周 | 业务 CRUD 闭环 + PC / 小程序主页面     | ✅ 完成（74/74 验收通过，tag `week2`） |
 | 第 3 周 | AI 能力层（RAG + 规划 Agent + SSE） | ✅ 完成（RAG 31/31 + 加固 32/32 验收通过，tag `week3`） |
-| 第 4 周 | RocketMQ 异步 + 微信订阅消息         | ⬜ 未开始                        |
+| 第 4 周 | RocketMQ 异步 + 微信订阅消息         | 🚧 进行中（Day 22~23 已完成：MQ 基建 + 错题自动打标跑通） |
 | 第 5 周 | 可视化收尾 + 性能优化                 | ⬜ 未开始                        |
 | 第 6 周 | 部署 + 文档 + 面试准备               | ⬜ 未开始                        |
 

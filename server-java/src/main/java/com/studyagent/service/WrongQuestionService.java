@@ -42,6 +42,16 @@ public interface WrongQuestionService extends IService<WrongQuestion> {
     /** 当前用户的标签列表（去重，按使用次数降序） */
     List<String> listTags(Long userId);
 
+    /**
+     * 追加标签（不替换原有标签），供 AI 自动打标等"增量补充"场景使用。
+     *
+     * <p>MQ 是至少一次投递：重复消费/重试都可能再跑一遍，所以本方法必须幂等 ——
+     * 已存在的关系跳过，唯一键 {@code uk_question_tag} 作最终兜底。</p>
+     *
+     * @return 实际新增的标签关系数
+     */
+    int appendTags(Long userId, Long questionId, List<String> tagNames);
+
     /** 取当前用户拥有的错题，不存在或不属于该用户时抛异常 */
     WrongQuestion requireOwned(Long userId, Long id);
 }

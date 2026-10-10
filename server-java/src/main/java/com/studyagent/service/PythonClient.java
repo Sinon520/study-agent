@@ -1,5 +1,6 @@
 package com.studyagent.service;
 
+import com.studyagent.model.vo.ClassifyResultVO;
 import com.studyagent.model.vo.KbIngestResultVO;
 
 /**
@@ -36,4 +37,16 @@ public interface PythonClient {
      * @return Python 原始响应（含 tasks / warnings / retries 等字段）
      */
     com.fasterxml.jackson.databind.JsonNode generatePlan(java.util.Map<String, Object> payload);
+
+    /**
+     * 错题 AI 归类：科目建议 + 知识点标签 + 难度估计。
+     *
+     * <p>由 RocketMQ 消费者（{@code WrongClassifyConsumer}）在收到
+     * {@code wrong-classify} 消息后调用，结果回写标签关系表（Day 23）。</p>
+     *
+     * @param wrongQuestionId 错题 ID（透传给 Python 只用于日志串联）
+     * @param content         错题题干文本
+     * @param subject         学生填写的科目（可为空）
+     */
+    ClassifyResultVO classify(Long wrongQuestionId, String content, String subject);
 }

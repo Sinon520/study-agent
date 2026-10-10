@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.studyagent.common.Result;
 import com.studyagent.common.exception.BizException;
 import com.studyagent.config.InternalProperties;
+import com.studyagent.model.vo.ClassifyResultVO;
 import com.studyagent.model.vo.KbIngestResultVO;
 import com.studyagent.service.PythonClient;
 import lombok.RequiredArgsConstructor;
@@ -99,6 +100,31 @@ public class PythonClientImpl implements PythonClient {
         // 显式 persist=false：落库由 Java 做（见 AgentPlanController 的说明）
         payload.put("persist", false);
         return post("/agent/plan", payload, "AI 生成计划");
+    }
+
+    @Override
+    public ClassifyResultVO classify(Long wrongQuestionId, String content, String subject) {
+        Map<String, Object> body = new java.util.HashMap<>();
+        body.put("wrongQuestionId", wrongQuestionId);
+        body.put("content", content == null ? "" : content);
+        body.put("subject", subject == null ? "" : subject);
+
+        JsonNode root = post("/agent/classify", body, "错题归类");
+        ClassifyResultVO vo = new ClassifyResultVO();
+        vo.setSubject(root.path("subject").asText(""));
+        vo.setReason(root.path("reason").asText(""));
+        JsonNode tags = root.path("tags");
+        if (tags.isArray()) {
+            tags.forEach(node -> {
+                String text = node.asText("");
+                if (!text.isBlank()) {
+                    vo.getTags().add(text);
+                }
+            });
+        }
+        JsonNode difficulty = root.path("difficulty");
+        vo.setDifficulty(difficulty.isNumber() ? difficulty.asInt() : null);
+        return vo;
     }
 
     private JsonNode post(String path, Map<String, Object> body, String action) {
