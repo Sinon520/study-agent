@@ -44,6 +44,9 @@
         {{ streaming ? '生成中' : '发送' }}
       </view>
     </view>
+
+    <!-- 版本标记：用于确认开发者工具加载的是不是最新构建（v2 = 分块接收 + 整包兜底） -->
+    <view class="build-tag">v2 · 分块接收</view>
   </view>
 </template>
 
@@ -149,12 +152,16 @@ export default {
 
       const onChunk = (chunkData) => {
         if (!chunkData) return
-        const bytes = new Uint8Array(chunkData)
-        if (decoder) {
-          buffer += decoder.decode(bytes, { stream: true })
-          consumeFrames()
-        } else {
-          rawChunks.push(bytes)
+        try {
+          const bytes = new Uint8Array(chunkData)
+          if (decoder) {
+            buffer += decoder.decode(bytes, { stream: true })
+            consumeFrames()
+          } else {
+            rawChunks.push(bytes)
+          }
+        } catch (e) {
+          // 单个分片解码异常不能中断整条流（宁可少一片，不能整条丢）
         }
         this.scrollToBottom()
       }
@@ -440,5 +447,13 @@ export default {
 
 .scroll-holder {
   height: 20rpx;
+}
+
+.build-tag {
+  padding: 4rpx 0 10rpx;
+  text-align: center;
+  font-size: 20rpx;
+  color: #c0c4cc;
+  background-color: #fff;
 }
 </style>
