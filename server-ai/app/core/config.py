@@ -91,6 +91,23 @@ class Settings(BaseSettings):
         default="study-agent-internal", alias="INTERNAL_TOKEN"
     )
 
+    # ---------------- RAG 检索参数（第 3 周） ----------------
+    #: 分块目标字符数，与执行计划一致
+    chunk_size: int = Field(default=500, alias="CHUNK_SIZE")
+    #: 相邻分块重叠字符数
+    chunk_overlap: int = Field(default=50, alias="CHUNK_OVERLAP")
+    #: 向量召回条数（先粗召回，再重排）
+    retrieve_top_k: int = Field(default=20, alias="RETRIEVE_TOP_K")
+    #: 重排后送入 prompt 的条数
+    rerank_top_k: int = Field(default=5, alias="RERANK_TOP_K")
+    #: 多轮问答带上的历史轮数
+    history_rounds: int = Field(default=6, alias="HISTORY_ROUNDS")
+    #: 低于该相似度的召回结果直接丢弃（0 表示不过滤）
+    min_score: float = Field(default=0.0, alias="MIN_SCORE")
+
+    #: 文件上传落盘目录（Java 上传接口把文件写到这里，或 Python 自己接收上传）
+    upload_dir: str = Field(default="./uploads", alias="UPLOAD_DIR")
+
     # ---------------- 对外只读辅助属性 ----------------
     @property
     def llm_configured(self) -> bool:
@@ -164,9 +181,41 @@ def apply_runtime_env() -> None:
     os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
     if settings.model_cache_dir_or_none:
         os.environ.setdefault("HF_HOME", settings.model_cache_dir_or_none)
-    # 可选：完全离线模式（默认不开，原因见上方 hf_hub_offline 字段注释）
-    if settings.hf_hub_offline:
-        os.environ["HF_HUB_OFFLINE"] = "1"
+    _normalize_milvus_uri()
+
+
+def _normalize_milvus_uri() -> None:
+    """给 `MILVUS_URI` 环境变量补一个**合法 URI 形态**，避免 pymilvus 在 import 期崩溃。
+
+    ⚠️ 这是一个很隐蔽的坑，值得完整记录：
+
+    `pymilvus` 在 **import 时**就会执行 `Connections()`，它读取环境变量
+    `MILVUS_URI` 并调用 `__parse_address_from_uri()`
+    （见 `pymilvus/orm/connections.py`）。那个函数只接受
+    `http[s]://host[:port]` 形态，遇到裸文件路径会直接抛：
+
+        ConnectionConfigException: Illegal uri: [./data/milvus_study.db],
+        expected form 'http[s]://[user:password@]example.com[:12345]'
+
+    而 pydantic-settings 加载 `.env` 时会把 `MILVUS_URI=./data/milvus_study.db`
+    写进 `os.environ` —— 于是只要 `.env` 里配了 Milvus 本地文件路径，
+    **import pymilvus 就会崩**，连 `MilvusClient(uri=...)` 都还没走到。
+
+    关键点：`MilvusClient` 自己的 Milvus-Lite 支持（`uri.endswith(".db")` 就启用本地实例，
+    见 `pymilvus/client/connection_manager.py`）是**后置**的，
+    它只在构造客户端时才生效，救不了 import 期的那次解析。
+
+    解决：应用代码**始终显式传 `uri=`** 给 `MilvusClient`（真实路径），
+    而环境变量只用来满足 import 期的语法校验，所以把它设成一个合法的占位 URI。
+    这样「配置仍读 `.env` 的真实路径」与「pymilvus 能正常 import」两件事不冲突。
+    """
+    uri = (get_settings().milvus_uri or "").strip()
+    if uri.startswith(("http://", "https://", "tcp://", "unix:")):
+        # 用户配的是真正的服务端地址，保持原样即可
+        return
+    # 本地文件模式：真正的路径由 milvus_store.get_client() 显式传给 MilvusClient，
+    # 这里的占位值只是为了让 pymilvus 的 import 期解析通过
+    os.environ["MILVUS_URI"] = "http://127.0.0.1:19530"
 
 
 # 模块导入即生效：确保 HF_ENDPOINT 在任何模型库 import 之前已进入环境变量

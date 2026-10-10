@@ -22,7 +22,7 @@ from app.core.config import get_settings
 from app.core.exceptions import register_exception_handlers
 from app.core.logger import logger, setup_logger
 from app.core.trace import TraceIdMiddleware, new_trace_id, set_trace_id
-from app.routers import debug, health
+from app.routers import agent, debug, health, rag
 
 DESCRIPTION = """
 **study-agent AI 服务**（FastAPI + LangChain 工程骨架）
@@ -85,6 +85,8 @@ def create_app() -> FastAPI:
 
     app.include_router(health.router)
     app.include_router(debug.router)
+    app.include_router(rag.router)
+    app.include_router(agent.router)
 
     @app.get("/", tags=["root"], summary="服务根路径")
     async def root() -> JSONResponse:
