@@ -184,6 +184,11 @@ export default {
 
       const reply = { role: 'assistant', content: '', reasoning: '', citations: [], error: '' }
       this.messages.push(reply)
+      // ⚠️ Vue3 响应式的关键细节：push 进去的**原始对象**直接改不会触发视图更新，
+      // 必须拿数组里返回的「响应式代理」来改。之前"先显示'思考中…'、结束后整段出现"
+      // 的根因就在这里 —— 内容其实一直在累积，但视图自始至终没重绘，
+      // 直到最后 streaming 翻转才触发唯一一次渲染，把全文一次性刷出来。
+      const replyRef = this.messages[this.messages.length - 1]
       this.streaming = true
 
       const token = getToken()
@@ -217,7 +222,7 @@ export default {
         while (index !== -1) {
           const frame = buffer.slice(0, index)
           buffer = buffer.slice(index + 2)
-          this.handleFrame(frame, reply)
+          this.handleFrame(frame, replyRef)
           index = buffer.indexOf('\n\n')
         }
       }
@@ -245,14 +250,14 @@ export default {
         // 记录本次实际走通的通道，显示在页面底部供验证：
         // 分块×N = onChunkReceived 生效；"整包" = 走了 success 一次性兜底
         this.recvInfo = chunkCount > 0 ? `分块×${chunkCount}` : '整包'
-        if (!reply.content && !reply.reasoning && !reply.error) {
+        if (!replyRef.content && !replyRef.reasoning && !replyRef.error) {
           const text = fallbackText || ''
           if (text && text.trim()) {
-            this.parseSseText(text, reply)
+            this.parseSseText(text, replyRef)
           }
         }
-        if (!reply.content && !reply.reasoning && !reply.error) {
-          reply.content = '没有收到回答：请确认已登录、开发者工具勾选了「不校验合法域名」，且后端 8080 正在运行。'
+        if (!replyRef.content && !replyRef.reasoning && !replyRef.error) {
+          replyRef.content = '没有收到回答：请确认已登录、开发者工具勾选了「不校验合法域名」，且后端 8080 正在运行。'
         }
         this.streaming = false
         this.scrollToBottom()
@@ -260,8 +265,8 @@ export default {
 
       const onFail = (err) => {
         const msg = (err && err.errMsg) || '网络错误'
-        reply.error = msg
-        reply.content = /domain|url not in/i.test(msg)
+        replyRef.error = msg
+        replyRef.content = /domain|url not in/i.test(msg)
           ? '请求被域名校验拦截：请到开发者工具「详情 → 本地设置」勾选「不校验合法域名…」后重试。'
           : `请求失败：${msg}（请确认后端 8080 正在运行）`
         settle('')
@@ -355,7 +360,8 @@ export default {
 
     scrollToBottom() {
       this.$nextTick(() => {
-        this.scrollTop = 999999
+        // 交替两个超大值：scroll-top 数值不变时组件不会重新滚动（同值更新也会被跳过）
+        this.scrollTop = this.scrollTop === 999999 ? 999998 : 999999
       })
     },
   },
