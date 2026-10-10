@@ -46,6 +46,21 @@ os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "60")
 EMBEDDING_MODEL = "BAAI/bge-m3"
 RERANKER_MODEL = "BAAI/bge-reranker-v2-m3"
 
+
+def _resolve(kind: str, fallback: str) -> str:
+    """复用 app 的解析逻辑：本地目录（server-ai/models/<name>）优先于 HF repo id。
+
+    必须和 `app/services/*` 走同一套解析，否则自检通过的路径与线上实际加载的
+    路径可能不一致（例如已用 ModelScope 下到本地目录，却仍去 HF 找）。
+    """
+    try:
+        from app.core.config import get_settings
+
+        settings = get_settings()
+        return settings.embedding_model_path if kind == "embed" else settings.reranker_model_path
+    except Exception:  # noqa: BLE001
+        return fallback
+
 QUERY = "什么是向量数据库？"
 PASSAGES = [
     "Milvus 是一款开源的向量数据库，支持十亿级向量检索。",
@@ -73,9 +88,10 @@ def preflight(model_name: str) -> bool:
 
 def check_embedding() -> bool:
     """检查嵌入模型，返回是否通过。"""
+    model_path = _resolve("embed", EMBEDDING_MODEL)
     print("=" * 78)
-    print(f"[1/2] 嵌入模型 {EMBEDDING_MODEL} (use_fp16=False)")
-    if not preflight(EMBEDDING_MODEL):
+    print(f"[1/2] 嵌入模型 {model_path} (use_fp16=False)")
+    if not preflight(model_path):
         return False
 
     started = time.perf_counter()
@@ -86,7 +102,7 @@ def check_embedding() -> bool:
         return False
 
     try:
-        model = BGEM3FlagModel(EMBEDDING_MODEL, use_fp16=False)
+        model = BGEM3FlagModel(model_path, use_fp16=False)
     except Exception as exc:  # noqa: BLE001
         print(f"      [FAIL] 加载失败: {type(exc).__name__}: {exc}")
         return False
@@ -115,9 +131,10 @@ def check_reranker() -> bool:
     `BAAI/bge-reranker-v2-m3` 是 XLM-RoBERTa 结构的 cross-encoder，
     需求指定用 FlagLLMReranker，若该类加载失败则自动回退 FlagReranker。
     """
+    model_path = _resolve("rerank", RERANKER_MODEL)
     print("=" * 78)
-    print(f"[2/2] 重排模型 {RERANKER_MODEL} (use_fp16=False)")
-    if not preflight(RERANKER_MODEL):
+    print(f"[2/2] 重排模型 {model_path} (use_fp16=False)")
+    if not preflight(model_path):
         return False
 
     try:
@@ -129,21 +146,23 @@ def check_reranker() -> bool:
     model = None
     kind = ""
     started = time.perf_counter()
+    # 首选 FlagReranker：bge-reranker-v2-m3 是 XLMRobertaForSequenceClassification
+    # cross-encoder；用 FlagLLMReranker 会按 CausalLM 加载并丢掉 classifier 打分头
     try:
-        from FlagEmbedding import FlagLLMReranker
+        from FlagEmbedding import FlagReranker
 
-        print("      尝试 FlagLLMReranker ...")
-        model = FlagLLMReranker(RERANKER_MODEL, use_fp16=False)
-        kind = "llm"
+        print("      加载 FlagReranker ...")
+        model = FlagReranker(model_path, use_fp16=False)
+        kind = "cross"
     except Exception as exc:  # noqa: BLE001
-        print(f"      FlagLLMReranker 失败（{type(exc).__name__}: {exc}），回退 FlagReranker ...")
+        print(f"      FlagReranker 失败（{type(exc).__name__}: {exc}），回退 FlagLLMReranker ...")
 
     if model is None:
         try:
-            from FlagEmbedding import FlagReranker
+            from FlagEmbedding import FlagLLMReranker
 
-            model = FlagReranker(RERANKER_MODEL, use_fp16=False)
-            kind = "cross"
+            model = FlagLLMReranker(model_path, use_fp16=False)
+            kind = "llm"
         except Exception as exc:  # noqa: BLE001
             print(f"      [FAIL] 加载失败: {type(exc).__name__}: {exc}")
             return False
@@ -152,7 +171,10 @@ def check_reranker() -> bool:
 
     try:
         if kind == "llm":
-            scores = model.compute_score(QUERY, PASSAGES)
+            try:
+                scores = model.compute_score(QUERY, PASSAGES)
+            except TypeError:
+                scores = model.compute_score([[QUERY, p] for p in PASSAGES])
         else:
             scores = model.compute_score([[QUERY, p] for p in PASSAGES])
         if hasattr(scores, "tolist"):

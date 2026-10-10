@@ -43,8 +43,68 @@ OPTIONAL_HINT_FILES: tuple[str, ...] = (
 )
 
 
+def _resolve_local_dir(model_name: str, cache_dir: str | None) -> "Path | None":
+    """把"模型名 + 缓存目录"解析成一个真实存在的本地目录。
+
+    支持三种摆放方式（都是实际会遇到的）：
+
+    1. `model_name` 本身就是本地目录（例如 ``./models/bge-m3``）；
+    2. **本地目录模式**：``cache_dir`` 下按模型叶子名建目录
+       （``models/bge-m3``、``models/bge-reranker-v2-m3``）—— 这是下载脚本用
+       ModelScope 下载后的布局，也是本项目当前使用的布局；
+    3. ``cache_dir`` 本身就是模型根目录（只放一个模型时）。
+
+    踩坑：最初这里只按 HuggingFace 缓存布局（``models--BAAI--bge-m3/snapshots/<hash>/``）
+    查文件，导致切换成本地目录后**重排模型预检永远失败**，而嵌入模型却能正常加载
+    （它直接吃 MODEL_CACHE_DIR 下的目录）—— 两边行为不一致，很容易误判成"模型没下完"。
+    """
+    from pathlib import Path
+
+    local = Path(model_name)
+    if local.is_dir():
+        return local
+
+    if not cache_dir:
+        return None
+
+    base = Path(cache_dir)
+    if not base.is_dir():
+        return None
+
+    # 本地目录模式：文件名是 "BAAI/bge-m3"，磁盘上是 models/bge-m3
+    leaf = model_name.split("/")[-1]
+    candidate = base / leaf
+    if candidate.is_dir():
+        return candidate
+
+    # 少数情况：cache_dir 直接就是模型根目录
+    if (base / "config.json").exists():
+        return base
+
+    # 兜底：cache_dir 下只有一层目录，且只有一个模型
+    subdirs = [d for d in base.iterdir() if d.is_dir()]
+    if len(subdirs) == 1:
+        return subdirs[0]
+
+    return None
+
+
 def cached_path(model_name: str, filename: str, cache_dir: str | None = None) -> str | None:
-    """查询某文件在本地缓存中的路径；未缓存返回 None（不联网）。"""
+    """查询某文件在本地缓存中的路径；未缓存返回 None（不联网）。
+
+    支持两种模型来源：
+    1. **本地目录**（ModelScope 下载到 ``server-ai/models/<name>/``）→ 直接查文件是否存在；
+    2. HuggingFace 缓存（repo id）→ 走 ``try_to_load_from_cache``。
+    """
+    local_dir = _resolve_local_dir(model_name, cache_dir)
+    if local_dir is not None:
+        target = local_dir / filename
+        if target.exists():
+            return str(target)
+        # 本地目录存在但文件缺失：说明确实没下完，不要再回退去查 HF 缓存
+        # （否则会给出"缓存里有、实际加载却找不到"的矛盾结论）
+        return None
+
     try:
         from huggingface_hub import try_to_load_from_cache
 

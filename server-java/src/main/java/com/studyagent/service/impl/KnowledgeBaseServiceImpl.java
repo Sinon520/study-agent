@@ -66,11 +66,27 @@ public class KnowledgeBaseServiceImpl extends ServiceImpl<KbDocumentMapper, KbDo
 
     /**
      * 解析任务线程池。
-     * <p>用小池子而不是 {@code new Thread}：解析是 CPU 密集（本地 BGE-M3 跑 CPU），
-     * 并发太高只会互相抢 CPU，串行度控制在 2 更稳。队列用
-     * {@code CallerRunsPolicy} 语义（这里用固定池 + 有界队列会丢任务，故直接固定池）。</p>
+     *
+     * <h3>为什么是固定池 + 为什么是 4 个线程</h3>
+     * 解析是**同步阻塞**的（Java 发 HTTP 给 Python，Python 里跑 CPU 密集的
+     * BGE-M3 向量化，整段要几秒到几十秒），所以线程数直接决定并发上传量。
+     *
+     * <p><b>这里踩过一次真实的坑</b>：最初给的是 2 个线程，验收时连续上传
+     * 两份文档，第二份在队列里等了 <b>267 秒</b>才被处理（日志里
+     * {@code 异步解析完成 ... 耗时=267220ms}），前端一直显示「解析中」，
+     * 看起来像卡死。根因就是池子太小 + 任务耗时长。</p>
+     *
+     * <p>取 4 而不是更大：向量化是 CPU 密集型，本地 BGE-M3 在 CPU 上跑，
+     * 并发太高只会互相抢核，总吞吐反而下降。4 是"本地单机演示"的合理折中；
+     * 真要多用户并发，正确做法是第 4 周把它换成 RocketMQ 消息 +
+     * 独立消费者（可水平扩容、能重试、能削峰），而不是无限加线程。</p>
+     *
+     * <p>线程设为 daemon：否则进程退出时会被这些线程拖住不结束
+     * （实测导致验收脚本挂住直到超时）。</p>
      */
-    private final ExecutorService ingestExecutor = Executors.newFixedThreadPool(2, runnable -> {
+    private static final int INGEST_POOL_SIZE = 4;
+
+    private final ExecutorService ingestExecutor = Executors.newFixedThreadPool(INGEST_POOL_SIZE, runnable -> {
         Thread thread = new Thread(runnable, "kb-ingest-" + UUID.randomUUID().toString().substring(0, 6));
         thread.setDaemon(true);
         return thread;
@@ -223,18 +239,24 @@ public class KnowledgeBaseServiceImpl extends ServiceImpl<KbDocumentMapper, KbDo
      * 调用方（{@link #upload}）完全不用改。</p>
      */
     private void triggerIngestAsync(Long documentId, Long userId, String filePath) {
+        long submittedAt = System.currentTimeMillis();
         ingestExecutor.submit(() -> {
             long started = System.currentTimeMillis();
+            long queuedMs = started - submittedAt;
+            if (queuedMs > 3000) {
+                // 排队超过 3 秒说明池子已经在打满，这条日志是扩容/换 MQ 的信号
+                log.warn("解析任务排队 {}ms（线程池可能已打满）documentId={}", queuedMs, documentId);
+            }
             try {
                 KbIngestResultVO result = pythonClient.ingest(documentId, userId, filePath, null, null);
-                log.info("异步解析完成 documentId={} 分块={} 向量={} 耗时={}ms",
+                log.info("异步解析完成 documentId={} 分块={} 向量={} 排队={}ms 解析={}ms",
                         documentId, result.getChunkCount(), result.getVectorCount(),
-                        System.currentTimeMillis() - started);
+                        queuedMs, System.currentTimeMillis() - started);
             } catch (Exception e) {
                 // Python 侧失败时也会回调把状态置为失败；这里再兜一层，
                 // 防止"连 Python 都连不上"导致状态永远停在「解析中」
-                log.error("异步解析失败 documentId={} 耗时={}ms", documentId,
-                        System.currentTimeMillis() - started, e);
+                log.error("异步解析失败 documentId={} 排队={}ms 耗时={}ms", documentId,
+                        queuedMs, System.currentTimeMillis() - started, e);
                 String reason = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
                 markStatusById(documentId, "失败", null, reason);
             }

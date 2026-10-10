@@ -89,44 +89,81 @@ def get_client() -> Any:
 
 
 def ensure_collection() -> str:
-    """确保 collection 存在（不存在则按 schema 建好并建索引）。"""
-    global _collection_ready
-    if _collection_ready:
-        return get_settings().milvus_collection
+    """确保 collection 存在（不存在则按 schema 建好并建索引），并**加载到内存**。
 
-    client = get_client()
+    ⚠️ 这里有一个必须记住的 Milvus 语义：collection 建好、索引建好、
+    数据也写进去了，它仍然可能是 `released` 状态 ——
+    **search / query 之前必须 `load()`，否则会直接报错**：
+
+        MilvusException: (code=101, message=Collection 'kb_chunk' is in state
+        'released'; call load() before search/get/query)
+
+    这个错在 pymilvus 里表现为一句几乎无信息的 `MilvusException()`，
+    非常容易误判成"集合不存在"或"数据没写进去"。所以：
+    1. 建完 collection 立即 `load()`；
+    2. 每次「确保」时都检查加载状态，未加载就 load（覆盖进程重启、数据文件被
+       其他进程打开过等导致的 released 状态）。
+    """
+    global _collection_ready
     name = get_settings().milvus_collection
+    client = get_client()
+
+    if _collection_ready:
+        _ensure_loaded_if_needed(client, name)
+        return name
 
     try:
-        if client.has_collection(name):
-            _collection_ready = True
-            return name
+        if not client.has_collection(name):
+            from pymilvus import DataType
 
-        from pymilvus import DataType
+            schema = client.create_schema(auto_id=False, enable_dynamic_field=False)
+            schema.add_field("id", DataType.VARCHAR, is_primary=True, max_length=64)
+            schema.add_field("user_id", DataType.INT64)
+            schema.add_field("document_id", DataType.INT64)
+            schema.add_field("chunk_index", DataType.INT64)
+            schema.add_field("page_no", DataType.INT64)
+            schema.add_field("content", DataType.VARCHAR, max_length=8192)
+            schema.add_field("embedding", DataType.FLOAT_VECTOR, dim=VECTOR_DIM)
 
-        schema = client.create_schema(auto_id=False, enable_dynamic_field=False)
-        schema.add_field("id", DataType.VARCHAR, is_primary=True, max_length=64)
-        schema.add_field("user_id", DataType.INT64)
-        schema.add_field("document_id", DataType.INT64)
-        schema.add_field("chunk_index", DataType.INT64)
-        schema.add_field("page_no", DataType.INT64)
-        schema.add_field("content", DataType.VARCHAR, max_length=8192)
-        schema.add_field("embedding", DataType.FLOAT_VECTOR, dim=VECTOR_DIM)
+            index_params = client.prepare_index_params()
+            index_params.add_index(
+                field_name="embedding",
+                index_type="HNSW",
+                metric_type="COSINE",
+                params={"M": 16, "efConstruction": 200},
+            )
 
-        index_params = client.prepare_index_params()
-        index_params.add_index(
-            field_name="embedding",
-            index_type="HNSW",
-            metric_type="COSINE",
-            params={"M": 16, "efConstruction": 200},
-        )
+            client.create_collection(collection_name=name, schema=schema, index_params=index_params)
+            logger.info("Milvus collection 已创建: {}（HNSW + COSINE, dim={}）", name, VECTOR_DIM)
 
-        client.create_collection(collection_name=name, schema=schema, index_params=index_params)
-        logger.info("Milvus collection 已创建: {}（HNSW + COSINE, dim={}）", name, VECTOR_DIM)
+        _ensure_loaded_if_needed(client, name, force=True)
         _collection_ready = True
         return name
+    except BizException:
+        raise
     except Exception as exc:  # noqa: BLE001
         raise BizException(code=5002, msg=f"Milvus collection 初始化失败：{exc!r}") from exc
+
+
+def _ensure_loaded_if_needed(client: Any, name: str, force: bool = False) -> None:
+    """确保 collection 处于 loaded 状态（search/query 的前置条件）。"""
+    if not force:
+        try:
+            state = client.get_load_state(collection_name=name)
+            # pymilvus 不同版本返回 dict 或对象，统一取 state 字段
+            value = state.get("state") if isinstance(state, dict) else getattr(state, "state", None)
+            if value is not None and "Loaded" in str(value):
+                return
+        except Exception as exc:  # noqa: BLE001 - 查状态失败就直接尝试 load
+            logger.debug("查询 collection 加载状态失败，直接尝试 load: {!r}", exc)
+
+    try:
+        client.load_collection(collection_name=name)
+        logger.info("Milvus collection 已加载到内存: {}", name)
+    except Exception as exc:  # noqa: BLE001
+        # load 失败不直接抛：可能已经处于 loaded（并发场景），交给后面的 search 报真实错误
+        logger.warning("load_collection({}) 失败（如果是已加载可忽略）: {!r}", name, exc)
+
 
 
 def insert_chunks(
@@ -245,7 +282,24 @@ def search(
             search_params={"metric_type": "COSINE", "params": {"ef": 128}},
         )
     except Exception as exc:  # noqa: BLE001
-        raise BizException(code=5002, msg=f"Milvus 检索失败：{exc!r}") from exc
+        # 把 Milvus 的异常**完整**打出来。
+        # 踩坑：pymilvus 的 MilvusException 常常 str() 是空的（只显示 "MilvusException()"），
+        # 只把 message 传给业务异常会得到一个没有任何信息的 5002，
+        # 排查时完全无从下手。所以这里把类型名 + repr + 参数一起记下来。
+        detail = f"{type(exc).__name__}: {exc!r}"
+        logger.error(
+            "Milvus 检索失败 | collection={} expr={!r} limit={} top_k={} | {}",
+            name,
+            expr,
+            max(1, int(top_k)),
+            top_k,
+            detail,
+        )
+        raise BizException(
+            code=5002,
+            msg=f"Milvus 检索失败（{type(exc).__name__}）：{exc!r}；"
+                f"collection={name}，请检查该 collection 是否已写入向量",
+        ) from exc
 
     hits: list[dict] = []
     for hit in (results[0] if results else []):
@@ -283,7 +337,18 @@ def collection_stats() -> dict:
     client = get_client()
     try:
         stats = client.get_collection_stats(collection_name=name)
-        return {"collection": name, "row_count": int(stats.get("row_count", 0))}
+        loaded = True
+        try:
+            state = client.get_load_state(collection_name=name)
+            value = state.get("state") if isinstance(state, dict) else getattr(state, "state", None)
+            loaded = value is None or "Loaded" in str(value)
+        except Exception:  # noqa: BLE001
+            pass
+        return {
+            "collection": name,
+            "row_count": int(stats.get("row_count", 0)),
+            "loaded": loaded,
+        }
     except Exception as exc:  # noqa: BLE001
         logger.warning("获取 Milvus 统计失败: {!r}", exc)
         return {"collection": name, "row_count": -1, "error": str(exc)}

@@ -83,34 +83,36 @@ cd D:\code\wkbdy\study-agent\server-ai
 
 ## 三、模型下载与自检
 
-模型只下载一次，缓存在 HF 默认缓存目录（Windows：`C:\Users\<user>\.cache\huggingface\hub`）。
+**结论先说：国内请用 ModelScope（魔搭），不要去碰 hf-mirror。**
+实测同一台机器同一个 2.2GB 权重：
+
+| 来源 | 实测速率 | 2.2GB 耗时 | 备注 |
+| --- | --- | --- | --- |
+| hf-mirror.com | **0.167 MB/s** | 约 3.8 小时/个 | 在大文件上还会**挂死**（socket 不关也不给数据，超时都不触发） |
+| **ModelScope 魔搭** | **28.6 MB/s** | **约 80 秒/个** | 两个模型的字节数与 HF **完全一致** |
+
+两个模型全部下完**总共 181.9 秒**（bge-m3 82.7s + reranker 98.7s，共 4.4GB）。
 
 ```powershell
-# HuggingFace 直连慢，必须先设置镜像端点
-$env:HF_ENDPOINT = "https://hf-mirror.com"
-$env:HF_HUB_DISABLE_XET = "1"   # 必设！否则会绕开镜像直连 xet CAS 并 401
+cd D:\code\wkbdy\study-agent\server-ai
 
-# 推荐：带看门狗下载（下载进程挂死时自动杀掉并断点续传，适合挂机过夜）
-.\.venv\Scripts\python.exe scripts\download_models.py --supervise --stall-timeout 180
-
-# 普通下载（不做挂死守护）
+# ★ 推荐：ModelScope（默认源），下载到 server-ai/models/（已在 .gitignore 中）
 .\.venv\Scripts\python.exe scripts\download_models.py
+.\.venv\Scripts\python.exe scripts\download_models.py --only bge-reranker-v2-m3
 
-# 只下一个 / 指定重试次数 / 连 onnx 一起下（默认跳过 onnx，省 2.2GB 重复权重）
-.\.venv\Scripts\python.exe scripts\download_models.py --only bge-m3 --retries 5
-.\.venv\Scripts\python.exe scripts\download_models.py --include-onnx
+# 备选：hf-mirror（慢且会挂死，需要看门狗兜底）
+.\.venv\Scripts\python.exe scripts\download_models.py --source hf --supervise --stall-timeout 180
 ```
 
-**为什么要 `--supervise`（实测踩坑）**：hf-mirror 在传 2.2GB 大文件时会**挂死** ——
-socket 不关也不给数据，`HF_HUB_DOWNLOAD_TIMEOUT` 也没能触发，日志会永久停在
-`pytorch_model.bin` 那一行。看门狗把「永久挂死」变成「杀掉后断点续传」，
-实测 30 秒无字节增长即被识别并自动重启续传。另一个客观限制：镜像的
-302 签名地址带 `X-Amz-Expires=3600`（1 小时），而本机到镜像约 0.1~0.2 MB/s，
-2.2GB 单文件**必然**超过一次 URL 生命周期，所以「反复续传」是唯一可行路径。
+**模型放哪里 / 要不要改 `.env`**：下载到 `server-ai/models/bge-m3/` 与
+`server-ai/models/bge-reranker-v2-m3/`。`app/core/config.py` 的
+`embedding_model_path` / `reranker_model_path` 会自动做「**本地目录优先**」解析：
+只要 `models/<name>/config.json` 存在就优先用本地权重，
+所以 `.env` 里保持 `EMBEDDING_MODEL=BAAI/bge-m3` **原样不用改**。
 
 脚本行为：
-- **逐文件**下载，已下载的文件秒过（断点续传），单个文件失败重试 3 次且**不影响其它文件**；
-- 每行打印「文件序号 / 总体百分比 / 已下载字节 / 文件名」，日志可实时判断进度；
+- **逐文件**下载；**严格校验字节数**，与仓库上报大小完全一致才落地（见下方踩坑）；
+- 每行打印「文件序号 / 总体百分比 / 已下载字节 / 文件名 / 速率」，日志可实时判断进度；
 - 结束时打印**逐个文件的本地路径与大小**，并列出缺失清单作为验收依据。
 
 自检（真实加载模型并出结果）：
@@ -123,7 +125,20 @@ socket 不关也不给数据，`HF_HUB_DOWNLOAD_TIMEOUT` 也没能触发，日�
 .\.venv\Scripts\python.exe scripts\check_models.py --strict
 ```
 
-预期输出：嵌入向量维度 **1024**；重排返回 3 个分数（与 passage 数量一致）。
+实测输出（`--strict`，且 `HF_HUB_OFFLINE=1` 强制离线，证明本地即可加载、不依赖网络）：
+```
+[1/2] 嵌入模型 D:\...\models\bge-m3 (use_fp16=False)
+      [OK] 本地缓存完整 | 权重 = pytorch_model.bin
+      [OK] 向量维度 = 1024 (期望 1024)
+[2/2] 重排模型 D:\...\models\bge-reranker-v2-m3 (use_fp16=False)
+      加载 FlagReranker ... 实现类=cross
+      passage[0] score=0.189282   Milvus 是一款开源的向量数据库，支持十亿级向量检索。
+      passage[1] score=-11.035801 今天北京天气晴朗，气温 25 摄氏度。
+      passage[2] score=-6.205856  BGE-M3 支持稠密、稀疏与多向量三种检索方式。
+      分数列表 = [0.189282, -11.035801, -6.205856]
+结果: 嵌入=通过  重排=通过   (exit 0)
+```
+排序语义正确：真正相关的「Milvus 是向量数据库」得分最高，无关的天气句最低。
 
 ---
 
@@ -278,6 +293,9 @@ curl.exe -N "http://127.0.0.1:8000/debug/stream?prompt=只回复两个字：在�
 
 | 问题 | 现象 | 解决 |
 | --- | --- | --- |
+| **hf-mirror 太慢+挂死** | 仅 0.167 MB/s（2.2GB 要 ~3.8h），且大文件会永久卡住 | **改用 ModelScope（28.6 MB/s，~80s）**，见第三节 |
+| **下载文件被追加损坏** | `SafetensorError: Error while deserializing header: incomplete metadata, file not fully covered`；`model.safetensors` 变成 2,382,220,908 B（比正确的多 106 MB） | 早先版本用 HTTP Range 做 append 续传，redirect/CDN 在重试时语义不一致导致重复追加。改为**每次从零写 `.part` + 校验字节数完全一致才原子改名**，不一致就重下 |
+| **重排模型架构加载错** | `FlagLLMReranker` 把 bge-reranker-v2-m3 按 `XLMRobertaForCausalLM` 加载：`classifier.dense/out_proj` 被标 UNEXPECTED 丢弃，凭空新建 `lm_head.*`；随后 `compute_score() takes 2 positional arguments but 3 were given` | bge-reranker-v2-m3 是 `XLMRobertaForSequenceClassification` cross-encoder，**必须用 `FlagReranker`**；`FlagLLMReranker` 只适用于 bge-reranker-v2-gemma/minicpm 等生成式重排模型。已改为 FlagReranker 优先、FlagLLMReranker 兜底 |
 | PyPI 直连不通 | `pip install` 超时/SSL 错误 | 加 `-i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com`，并 `pip config set --site` 写进 venv |
 | HuggingFace 下载慢 | `snapshot_download` 卡住 | 先 `$env:HF_ENDPOINT="https://hf-mirror.com"`，再运行 `scripts/download_models.py` |
 | **hf-xet 401** | `File reconstruction error: CAS Client Error: HTTP status client error (401 Unauthorized), domain: https://cas-server.xethub.hf.co/...` | `hf-xet` 会**绕过镜像直连** HF 的 CAS 服务；设 `HF_HUB_DISABLE_XET=1` 强制走经典 HTTP 下载（脚本与 `config.apply_runtime_env()` 已内置） |

@@ -34,11 +34,23 @@ SYSTEM_PROMPT = """你是一位严谨的备考学习助手，服务于考研 / �
 
 回答规则（必须严格遵守）：
 1. **只依据下面给出的「参考资料」回答**。资料中没有提到的内容，不要凭自己的知识补充。
-2. 如果参考资料无法回答这个问题，直接回答：「资料里没有相关内容」，然后可以简短说明
-   需要补充哪方面的资料。**不要编造**。
+2. 如果参考资料无法回答这个问题，**只用一句话**回答：「资料里没有相关内容」，
+   然后可以简短说明需要补充哪方面的资料。**不要展开讲述、不要编造、不要用你自己的知识作答**。
 3. 引用资料时，在相应句子后面用 [编号] 标注依据，例如「定积分的几何意义是曲边梯形的面积 [1]」。
 4. 回答用中文，结构清晰：先给结论，再给依据与步骤；数学公式用 LaTeX 写法。
 5. 不要复述这些规则，也不要提及"根据参考资料"这类套话，直接回答即可。"""
+
+#: 没有检索到资料时额外叠加的硬约束。
+#: 实测发现：只在 system prompt 里写"资料没有就说不知道"，
+#: 面对"量子纠缠"这种模型自己很熟的问题，它仍会绕开约束、直接凭记忆长篇作答
+#: （这与 RAG 的核心价值相悖：宁可说不知道，也不能让用户以为答案来自他的资料）。
+#: 所以在**确认没召回**的情况下，再补一段更强的指令，把行为锁死。
+NO_MATERIAL_PROMPT = """【本轮没有检索到任何参考资料】
+
+因此你**不能**使用自己的知识回答这个问题。请严格只输出下面这句话，
+不要添加任何解释、不要列举量子计算等无关内容：
+
+资料里没有相关内容，建议先上传相关的复习资料后再提问。"""
 
 
 @dataclass
@@ -172,16 +184,49 @@ def build_context(
     question: str,
     session_id: int | None = None,
 ) -> RagContext:
-    """检索 + 拼 prompt（不含生成）。"""
+    """检索 + 拼 prompt（不含生成）。
+
+    <h3>为什么要按重排分数过滤</h3>
+    向量召回**永远会返回 top_k 条**，哪怕库里根本没有相关内容 ——
+    余弦相似度对任意两段中文都会是正数，区分不了"相关"与"无关"。
+    实测：只有一份《定积分复习要点》的库，问"量子纠缠在量子计算中的应用"，
+    依然召回 3 条、还拼进 prompt 让模型去"依据资料回答"。
+
+    BGE-Reranker 是 cross-encoder，对不相关的组合会给明显负分
+    （相关 ≈ +0.2~+0.6，不相关 ≈ -6~-11），所以用它的分数当门槛，
+    低于 {@code settings.min_score} 的直接丢掉；一条都不剩时
+    就走"资料里没有相关内容"的分支。这是 RAG 防幻觉最关键的一道闸。
+    """
     settings = get_settings()
     chunks = retrieve(user_id, question)
 
+    if chunks:
+        logger.info(
+            "RAG 重排分数: 最高 {:.4f} 最低 {:.4f} | 门槛 {:.4f}",
+            chunks[0].rerank_score or 0.0,
+            min((c.rerank_score or 0.0) for c in chunks),
+            settings.min_score,
+        )
+
     # 相似度过低的召回直接丢掉：宁可说"资料里没有"，也不要拿不相关的片段硬编
     if settings.min_score > 0:
-        chunks = [c for c in chunks if (c.rerank_score or 0) >= settings.min_score]
+        kept = [c for c in chunks if (c.rerank_score or 0.0) >= settings.min_score]
+        if len(kept) != len(chunks):
+            logger.info(
+                "按重排分数过滤: {} 条 -> {} 条（门槛 {:.4f}）",
+                len(chunks),
+                len(kept),
+                settings.min_score,
+            )
+        chunks = kept
 
     if not chunks:
+        logger.info("没有达到相关度门槛的资料，将引导模型回答「资料里没有相关内容」")
         return RagContext(chunks=[], prompt=_build_no_material_prompt(question), has_material=False)
+
+    # 重新编号：过滤后编号必须连续，否则 prompt 里的 [1][3] 和 citations 对不上
+    for index, chunk in enumerate(chunks, start=1):
+        chunk.citation_index = index
 
     return RagContext(
         chunks=chunks,
@@ -218,11 +263,21 @@ def _build_prompt(question: str, chunks: list[RetrievedChunk], session_id: int |
 
 
 def _build_no_material_prompt(question: str) -> str:
-    """没有召回结果时的 prompt：明确要求模型说"不知道"。"""
+    """没有召回（或全部被门槛过滤）时的 prompt。
+
+    这里刻意把「资料为空」写成资料区的一项内容，而不是只在 system prompt 里
+    说一句"没有资料就说不知道"。原因是实测：只在 system prompt 里约束，
+    面对模型自己很熟的话题（比如量子纠缠），它会绕开约束、直接凭记忆长篇作答 ——
+    这恰恰违背 RAG 的初衷（用户会误以为内容是来自他自己的资料）。
+    把事实放进 user 消息里、并给出**唯一允许的回复模板**，行为才锁得住。
+    """
     return (
-        "【参考资料】\n（没有检索到任何相关资料）\n\n"
+        "【参考资料】\n（本轮没有检索到任何相关资料）\n\n"
         f"【学生的问题】\n{question}\n\n"
-        "请直接回答「资料里没有相关内容」，并简短说明需要补充哪方面的资料。不要编造答案。"
+        "【硬性要求】\n"
+        "由于参考资料为空，你不能使用自己的知识回答这个问题。\n"
+        "请严格只输出下面这一句话，不要补充、不要解释、不要举例、不要提及任何专业名词：\n"
+        "资料里没有相关内容，建议先上传相关的复习资料后再提问。"
     )
 
 

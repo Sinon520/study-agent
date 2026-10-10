@@ -5,18 +5,43 @@
 - 真正调用 `rerank()` 时若模型不可用，抛 `ModelNotReadyError`，
   由全局异常处理器转成 HTTP 503 + `{"code": 5031, ...}`。
 
-关于加载类：
-需求指定 `FlagLLMReranker`。但 `BAAI/bge-reranker-v2-m3` 实际是
-XLM-RoBERTa 结构的 cross-encoder 权重，官方推荐类为 `FlagReranker`；
-`FlagLLMReranker` 面向 bge-reranker-v2-gemma / minicpm 这类生成式重排模型。
-因此这里采用「优先 FlagLLMReranker，失败自动回退 FlagReranker」的兼容策略，
-两者调用签名都已在 `_compute_scores()` 中统一。
+## 为什么用 `FlagReranker` 而不是 `FlagLLMReranker`（实测修正）
+
+执行计划里写的是 `FlagLLMReranker`，但**实测证明它对这个模型是错的**：
+
+`FlagLLMReranker` 构造时并不报错（它按生成式模型把权重加载进来），
+但打分时会抛：
+
+    TypeError: AbsReranker.compute_score() takes 2 positional arguments but 3 were given
+
+因为它的 `compute_score` 签名是 `(self, pairs)`，而调用是 `compute_score(query, passages)`。
+更根本的问题是**权重架构不对**：`BAAI/bge-reranker-v2-m3` 是 XLM-RoBERTa 结构的
+**cross-encoder**（带 `classifier.dense` / `classifier.out_proj` 分类头），
+而 `FlagLLMReranker` 面向 bge-reranker-v2-gemma / minicpm 这类**生成式**重排模型
+（靠 lm_head 的 logits 打分）。实测加载日志就是证据：
+
+    XLMRobertaForCausalLM LOAD REPORT
+    classifier.dense.weight    | UNEXPECTED
+    classifier.out_proj.weight | UNEXPECTED
+    lm_head.*                  | MISSING
+
+分类头根本没被用上、lm_head 是随机初始化的 —— 即使不报错，
+打出来的分数也是无意义的。所以这里**按架构先判断再加载**：
+
+- `xlm-roberta` / `bert` 这类编码器架构 → `FlagReranker`；
+- 确实加载生成式重排模型（bge-reranker-v2-gemma 等）时才用 `FlagLLMReranker`。
+
+判断依据取自模型自己的 `config.json`（`architectures` / `model_type`），
+而不是"先试一个、失败再试另一个"—— 后者会像这次一样
+**先失败、再静默用错类**，比直接报错更危险。
 """
 
 from __future__ import annotations
 
+import json
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 from app.core.config import apply_runtime_env, get_settings
@@ -28,13 +53,81 @@ from app.services.model_cache import assert_model_cached
 _instance: "BGEReranker | None" = None
 _instance_lock = threading.Lock()
 
+#: 属于"生成式重排"的架构特征（这类才需要 FlagLLMReranker）
+_GENERATIVE_ARCH_HINTS = ("ForCausalLM", "ForConditionalGeneration")
+
+
+def _resolve_model_dir(model_name: str, cache_dir: str | None) -> Path | None:
+    """定位模型目录：优先 MODEL_CACHE_DIR（本地目录模式），否则找 HF 缓存 snapshot。"""
+    # model_name 本身就是一个本地模型目录（ModelScope 下到 server-ai/models/ 的情形）
+    direct = Path(model_name)
+    if direct.is_dir() and (direct / "config.json").exists():
+        return direct
+
+    leaf = model_name.split("/")[-1]
+
+    if cache_dir:
+        base = Path(cache_dir)
+        candidate = base / leaf
+        if candidate.exists():
+            return candidate
+        if base.exists():
+            # 本地目录模式下 cache_dir 可能直接就是模型根目录
+            return base if (base / "config.json").exists() else None
+        return None
+
+    hub = Path.home() / ".cache" / "huggingface" / "hub"
+    folder = hub / ("models--" + model_name.replace("/", "--"))
+    if not folder.exists():
+        return None
+    snapshots = sorted((folder / "snapshots").glob("*"))
+    return snapshots[-1] if snapshots else None
+
+
+def _detect_model_kind(model_name: str, cache_dir: str | None) -> str:
+    """读模型 config.json 判断该用哪种 FlagEmbedding 类。
+
+    Returns:
+        "cross"（cross-encoder，用 FlagReranker）或 "llm"（生成式，用 FlagLLMReranker）。
+        判断不出来时返回 "cross"：编码器架构是绝大多数重排模型的情况，
+        而且真用错时会明确报错，比"静默用错类"安全得多。
+    """
+    try:
+        model_dir = _resolve_model_dir(model_name, cache_dir)
+        if model_dir is None:
+            logger.warning("未能定位模型目录，按 cross-encoder（FlagReranker）处理")
+            return "cross"
+
+        config_file = model_dir / "config.json"
+        if not config_file.exists():
+            return "cross"
+
+        config = json.loads(config_file.read_text(encoding="utf-8"))
+        architectures = config.get("architectures") or []
+        model_type = str(config.get("model_type") or "")
+
+        for arch in architectures:
+            if any(hint in str(arch) for hint in _GENERATIVE_ARCH_HINTS):
+                logger.info("重排模型架构 {} 属于生成式，使用 FlagLLMReranker", arch)
+                return "llm"
+
+        logger.info(
+            "重排模型 architectures={} model_type={} 属编码器（cross-encoder），使用 FlagReranker",
+            architectures,
+            model_type,
+        )
+        return "cross"
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("读取重排模型架构失败，按 cross-encoder 处理: {!r}", exc)
+        return "cross"
+
 
 class BGEReranker:
     """BAAI/bge-reranker-v2-m3 重排器封装。"""
 
     def __init__(self, model_name: str | None = None) -> None:
         settings = get_settings()
-        self.model_name: str = model_name or settings.reranker_model
+        self.model_name: str = model_name or settings.reranker_model_path
         self._model: Any = None
         self._kind: str = ""  # "llm" 或 "cross"
         self._load_lock = threading.Lock()
@@ -64,8 +157,9 @@ class BGEReranker:
 
             # 必须在导入 FlagEmbedding/huggingface_hub 之前把 HF_ENDPOINT 写进环境变量
             apply_runtime_env()
+            settings = get_settings()
             # 预检本地缓存：缺文件就立刻抛 ModelNotReadyError -> HTTP 503
-            assert_model_cached(self.model_name, get_settings().model_cache_dir_or_none)
+            assert_model_cached(self.model_name, settings.model_cache_dir_or_none)
 
             try:
                 import FlagEmbedding  # noqa: F401
@@ -76,44 +170,27 @@ class BGEReranker:
                 logger.error("{} | model={}", self._load_error, self.model_name)
                 raise ModelNotReadyError(self._load_error, model=self.model_name) from exc
 
+            # 按模型架构**先决定**用哪个类，而不是"先试错再回退"
+            kind = _detect_model_kind(self.model_name, settings.model_cache_dir_or_none)
             started = time.perf_counter()
-            model = None
-            errors: list[str] = []
 
-            # 1) 首选：FlagLLMReranker（需求指定）
             try:
-                from FlagEmbedding import FlagLLMReranker
+                if kind == "llm":
+                    from FlagEmbedding import FlagLLMReranker
 
-                logger.info("开始加载重排模型(FlagLLMReranker): {}", self.model_name)
-                model = FlagLLMReranker(self.model_name, use_fp16=False)
-                self._kind = "llm"
-            except Exception as exc:  # noqa: BLE001
-                errors.append(f"FlagLLMReranker 失败: {exc!r}")
-                logger.warning(
-                    "FlagLLMReranker 加载 {} 失败，回退 FlagReranker: {!r}",
-                    self.model_name,
-                    exc,
-                )
-
-            # 2) 回退：FlagReranker（bge-reranker-v2-m3 官方推荐类）
-            if model is None:
-                try:
+                    logger.info("开始加载重排模型(FlagLLMReranker): {}", self.model_name)
+                    self._model = FlagLLMReranker(self.model_name, use_fp16=False)
+                else:
                     from FlagEmbedding import FlagReranker
 
                     logger.info("开始加载重排模型(FlagReranker): {}", self.model_name)
-                    model = FlagReranker(self.model_name, use_fp16=False)
-                    self._kind = "cross"
-                except Exception as exc:  # noqa: BLE001
-                    errors.append(f"FlagReranker 失败: {exc!r}")
-
-            if model is None:
-                self._load_error = (
-                    "重排模型加载失败（模型文件可能未下载）: " + " | ".join(errors)
-                )
+                    self._model = FlagReranker(self.model_name, use_fp16=False)
+                self._kind = kind
+            except Exception as exc:  # noqa: BLE001
+                self._load_error = f"重排模型加载失败（模型文件可能未下载）: {exc!r}"
                 logger.error("{} | model={}", self._load_error, self.model_name)
-                raise ModelNotReadyError(self._load_error, model=self.model_name)
+                raise ModelNotReadyError(self._load_error, model=self.model_name) from exc
 
-            self._model = model
             self._load_seconds = time.perf_counter() - started
             self._load_error = None
             logger.info(

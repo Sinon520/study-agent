@@ -69,6 +69,9 @@ class Settings(BaseSettings):
     # True：模型只从本地缓存加载，缺失时**立刻**返回 503，绝不在请求里联网下载几 GB
     # False：允许 huggingface_hub 在请求内按需下载（开发期方便，但会长时间阻塞请求）
     model_local_files_only: bool = Field(default=True, alias="MODEL_LOCAL_FILES_ONLY")
+    # 本地模型根目录（ModelScope 等渠道下载到这里，已在 .gitignore 中）；
+    # 相对路径以 server-ai/ 为基准。存在 server-ai/models/<name>/config.json 时优先用它
+    models_dir: str = Field(default="models", alias="MODELS_DIR")
 
     # ---------------- MySQL ----------------
     mysql_host: str = Field(default="127.0.0.1", alias="MYSQL_HOST")
@@ -102,8 +105,20 @@ class Settings(BaseSettings):
     rerank_top_k: int = Field(default=5, alias="RERANK_TOP_K")
     #: 多轮问答带上的历史轮数
     history_rounds: int = Field(default=6, alias="HISTORY_ROUNDS")
-    #: 低于该相似度的召回结果直接丢弃（0 表示不过滤）
-    min_score: float = Field(default=0.0, alias="MIN_SCORE")
+    #: 重排分数的下限，低于它的召回结果直接丢弃（0 表示不过滤）。
+    #:
+    #: 为什么默认给 0.1 而不是 0：**向量相似度不能用来判断"资料里有没有"**。
+    #: 实测：拿"量子纠缠在量子计算中的应用"去问一个只放了《定积分复习要点》的库，
+    #: Milvus 依然返回 3 条 chunk，而且余弦相似度是**正数** ——
+    #: 嵌入模型对任意两段中文都会给出一定的正相似度，区分度不足。
+    #: 结果就是 hasMaterial=true，并且拿定积分的内容去回答量子力学，
+    #: 还给出了一条"引用来源"（用户会误以为答案来自他自己的资料）。
+    #:
+    #: 而 BGE-Reranker 是 cross-encoder，对"不相关"会给出**明显负分**：
+    #:   相关（问定积分，命中定积分资料） ≈ +0.19 ~ +0.62
+    #:   不相关（问量子纠缠，只有定积分资料）≈ -6 ~ -11
+    #: 所以用重排分数当门槛才是可靠信号，0.1 落在正负之间的安全带里。
+    min_score: float = Field(default=0.1, alias="MIN_SCORE")
 
     #: 文件上传落盘目录（Java 上传接口把文件写到这里，或 Python 自己接收上传）
     upload_dir: str = Field(default="./uploads", alias="UPLOAD_DIR")
@@ -128,6 +143,45 @@ class Settings(BaseSettings):
         value = (self.model_cache_dir or "").strip()
         return value or None
 
+    def _resolve_model_path(self, value: str) -> str:
+        """把 HF repo id 解析为**本地目录**（若已通过 ModelScope 下载到本地）。
+
+        规则：
+        1. value 本身已是含 config.json 的目录 → 直接用；
+        2. 否则取 `/` 后最后一段作为目录名，若 ``<models_dir>/<name>/config.json`` 存在，
+           返回该本地目录（FlagEmbedding/transformers 支持直接传本地路径）；
+        3. 都不满足则原样返回 repo id（走 HuggingFace 缓存）。
+
+        这样 `.env` 里的 ``EMBEDDING_MODEL=BAAI/bge-m3`` **无需改动**，
+        只要 ``server-ai/models/bge-m3/`` 存在就会自动优先用本地权重。
+        """
+        raw = (value or "").strip()
+        if not raw:
+            return raw
+
+        direct = Path(raw)
+        if direct.is_dir() and (direct / "config.json").exists():
+            return str(direct)
+
+        name = raw.rstrip("/").split("/")[-1]
+        base = Path(self.models_dir)
+        if not base.is_absolute():
+            base = BASE_DIR / base
+        local = base / name
+        if (local / "config.json").exists():
+            return str(local)
+        return raw
+
+    @property
+    def embedding_model_path(self) -> str:
+        """嵌入模型实际加载路径（本地目录优先）。"""
+        return self._resolve_model_path(self.embedding_model)
+
+    @property
+    def reranker_model_path(self) -> str:
+        """重排模型实际加载路径（本地目录优先）。"""
+        return self._resolve_model_path(self.reranker_model)
+
     def summary(self) -> dict[str, object]:
         """启动时打印的配置摘要（已脱敏）。"""
         return {
@@ -140,7 +194,9 @@ class Settings(BaseSettings):
             "dashscope_api_key": self.masked_api_key,
             "preserve_reasoning": self.preserve_reasoning,
             "embedding_model": self.embedding_model,
+            "embedding_model_path": self.embedding_model_path,
             "reranker_model": self.reranker_model,
+            "reranker_model_path": self.reranker_model_path,
             "model_cache_dir": self.model_cache_dir_or_none or "(HF 默认缓存)",
             "model_local_files_only": self.model_local_files_only,
             "mysql": f"{self.mysql_host}:{self.mysql_port}/{self.mysql_database}",

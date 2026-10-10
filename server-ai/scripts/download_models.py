@@ -30,6 +30,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -209,6 +210,185 @@ def download_repo(
     return {"repo": repo_id, "files": done, "failed": failed, "ok": not failed}
 
 
+# ==========================================================================
+# ModelScope（魔搭）后端 —— 国内强烈推荐，默认下载源
+# --------------------------------------------------------------------------
+# 为什么加这个：hf-mirror.com 实测只有 **0.167 MB/s** 且会挂死，
+# 而 ModelScope 实测 **28.6 MB/s（快约 170 倍）**，2.2GB 权重 1~2 分钟就下完。
+# 两个模型在 ModelScope 上的字节数与 HF 完全一致
+# （bge-m3 pytorch_model.bin = 2,271,145,830 B，逐一核对过）。
+# 下载到**本地目录** server-ai/models/<name>/（该目录已在 .gitignore 中），
+# 由 app/core/config.py 自动解析并优先使用本地目录，.env 无需任何改动。
+# ==========================================================================
+
+MODELSCOPE_FILE_LIST = (
+    "https://modelscope.cn/api/v1/models/{repo}/repo/files?Revision=master&Recursive=true"
+)
+MODELSCOPE_FILE_URL = (
+    "https://modelscope.cn/api/v1/models/{repo}/repo?Revision=master&FilePath={path}"
+)
+
+#: 跳过图片与重复的 onnx 权重（onnx/model.onnx_data 是与 pytorch_model.bin 等大的重复副本）
+MS_SKIP_PREFIXES = ("onnx/", "imgs/", "assets/")
+MS_SKIP_SUFFIXES = (
+    ".jpg", ".jpeg", ".png", ".webp", ".gif", ".gitattributes", ".ds_store",
+)
+
+
+def _ms_should_skip(path: str) -> bool:
+    if path.startswith(MS_SKIP_PREFIXES):
+        return True
+    return path.lower().endswith(MS_SKIP_SUFFIXES)
+
+
+def ms_list_files(repo_id: str) -> list[tuple[str, int]]:
+    """列出 ModelScope 仓库文件与大小（跳过图片/onnx）。"""
+    import urllib.request
+
+    url = MODELSCOPE_FILE_LIST.format(repo=repo_id)
+    try:
+        with urllib.request.urlopen(url, timeout=60) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        print(f"[FAIL] 无法获取 {repo_id} 文件清单: {type(exc).__name__}: {exc}")
+        return []
+
+    files = ((payload.get("Data") or {}).get("Files")) or []
+    out: list[tuple[str, int]] = []
+    for item in files:
+        if item.get("Type") != "blob":
+            continue
+        path = item.get("Path")
+        if not path or _ms_should_skip(path):
+            continue
+        out.append((path, int(item.get("Size") or 0)))
+    return out
+
+
+def ms_download_file(
+    repo_id: str, path: str, dest_root: Path, expected_size: int, retries: int, timeout: int
+) -> Path | None:
+    """下载单个文件到本地目录，**严格校验字节数**后才落地。
+
+    踩坑记录（重要）：早先的版本用 HTTP Range 做 append 断点续传，
+    结果 ModelScope 的 redirect/CDN 在重试时语义不一致，
+    导致 model.safetensors 被追加成了 2,382,220,908 字节
+    （比正确的 2,271,071,852 多出整整 106 MB），
+    transformers 加载时报 `SafetensorError: incomplete metadata, file not fully covered`。
+    现在改为：每次尝试都从零写入 `.part`，**校验字节数完全一致**才 rename 成正式文件名；
+    不一致就删掉重来。代价是失去断点续传，但换取「绝不产出损坏文件」——
+    在 20+ MB/s 下重来一次只要一分多钟，完全值得。
+    """
+    import requests
+
+    target = dest_root / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    part = target.with_name(target.name + ".part")
+    url = MODELSCOPE_FILE_URL.format(repo=repo_id, path=path)
+
+    for attempt in range(1, retries + 1):
+        if part.exists():
+            try:
+                part.unlink()
+            except OSError:
+                pass
+        try:
+            # 绝不复用已存在的字节（避免 append 语义造成的重复/截断）
+            with requests.get(url, stream=True, timeout=timeout) as resp:
+                if resp.status_code != 200:
+                    raise RuntimeError(f"HTTP {resp.status_code}")
+                written = 0
+                with open(part, "wb") as fh:
+                    for chunk in resp.iter_content(chunk_size=1 << 20):
+                        if chunk:
+                            fh.write(chunk)
+                            written += len(chunk)
+
+            actual = part.stat().st_size
+            if expected_size and actual != expected_size:
+                print(
+                    f"      [SIZE MISMATCH] 第 {attempt}/{retries} 次: 实际 {actual:,} B "
+                    f"!= 期望 {expected_size:,} B（差 {actual - expected_size:+,} B），丢弃重下"
+                )
+                try:
+                    part.unlink()
+                except OSError:
+                    pass
+                continue
+
+            part.replace(target)  # 校验通过才原子改名
+            return target
+        except Exception as exc:  # noqa: BLE001
+            if attempt < retries:
+                print(f"      [RETRY {attempt}/{retries - 1}] {path}: {type(exc).__name__}: {exc}")
+                time.sleep(2 * attempt)
+            else:
+                print(f"      [FAIL] {path}: {type(exc).__name__}: {exc}")
+    return None
+
+
+def download_repo_modelscope(name: str, repo_id: str, dest_root: Path, args) -> dict:
+    """从 ModelScope 下载整个仓库到本地目录，返回统计信息。"""
+    print("=" * 78)
+    print(f"仓库: {repo_id}  ({name})  [来源: ModelScope 魔搭]")
+    files = ms_list_files(repo_id)
+    if not files:
+        return {"repo": repo_id, "files": [], "failed": [], "ok": False}
+
+    total_bytes = sum(s for _, s in files)
+    total_files = len(files)
+    target_dir = dest_root / name
+    print(f"待下载文件数: {total_files}   总体积: {_fmt(total_bytes)}")
+    print(f"目标目录: {target_dir}")
+
+    done: list[tuple[str, str, int]] = []
+    failed: list[str] = []
+    done_bytes = 0
+    started_all = time.perf_counter()
+
+    for idx, (path, size) in enumerate(files, start=1):
+        pct = (done_bytes / total_bytes * 100) if total_bytes else 0.0
+        pre = target_dir / path
+        complete = pre.exists() and (size == 0 or pre.stat().st_size == size)
+        print(
+            f"[{idx:>3}/{total_files}] 总体 {pct:5.1f}% | "
+            f"已下载 {_fmt(done_bytes)}/{_fmt(total_bytes)} | {path}"
+            f"{'  [已存在，跳过]' if complete else ''}"
+        )
+        if complete:
+            done_bytes += pre.stat().st_size
+            done.append((path, str(pre), pre.stat().st_size))
+            continue
+
+        t0 = time.perf_counter()
+        local = ms_download_file(repo_id, path, target_dir, size, args.retries, args.timeout)
+        if local:
+            real = local.stat().st_size
+            done_bytes += real
+            done.append((path, str(local), real))
+            speed = real / max(time.perf_counter() - t0, 1e-6) / 1048576
+            print(
+                f"      [OK] {_fmt(real)}  用时 {time.perf_counter() - t0:.1f}s ({speed:.1f} MB/s)"
+            )
+        else:
+            failed.append(path)
+
+    print("-" * 78)
+    print(f"[{repo_id}] 已就绪文件清单（本地路径 + 大小）：")
+    for path, local, real in done:
+        print(f"  {_fmt(real):>10}  {local}")
+    if failed:
+        print(f"[{repo_id}] 缺失/失败文件（{len(failed)} 个，可重跑续传）：")
+        for path in failed:
+            print(f"  MISSING    {path}")
+    print(
+        f"[{repo_id}] 结果: {len(done)}/{total_files} 个文件就绪，"
+        f"共 {_fmt(done_bytes)}，总耗时 {time.perf_counter() - started_all:.1f}s"
+    )
+    print("=" * 78)
+    return {"repo": repo_id, "files": done, "failed": failed, "ok": not failed}
+
+
 def cache_bytes(repo_ids: list[str]) -> int:
     """统计目标仓库在 HF 缓存里已占用的总字节数（含 .incomplete 分片）。"""
     try:
@@ -326,9 +506,20 @@ def main() -> int:
         "--include-onnx", action="store_true", help="同时下载 onnx/ 目录（重复权重，默认跳过）"
     )
     parser.add_argument(
+        "--source",
+        choices=("modelscope", "hf"),
+        default="modelscope",
+        help="下载源：modelscope=魔搭（国内快，默认，实测 28.6MB/s）；hf=hf-mirror（慢且会挂死）",
+    )
+    parser.add_argument(
+        "--dest",
+        default=None,
+        help="ModelScope 源的目标目录，默认 server-ai/models",
+    )
+    parser.add_argument(
         "--supervise",
         action="store_true",
-        help="开启看门狗：下载进程挂死时自动杀掉并续传（无人值守推荐）",
+        help="开启看门狗：下载进程挂死时自动杀掉并续传（仅 hf 源需要）",
     )
     parser.add_argument(
         "--stall-timeout", type=int, default=180, help="看门狗判定停滞的秒数，默认 180"
@@ -340,9 +531,37 @@ def main() -> int:
 
     targets = {n: MODELS[n] for n in args.only} if args.only else dict(MODELS)
 
-    if args.supervise and not args._worker:
+    if args.supervise and not args._worker and args.source == "hf":
         return supervise(args, targets)
 
+    # ---------------- ModelScope 源（默认） ----------------
+    if args.source == "modelscope":
+        dest_root = Path(args.dest) if args.dest else Path(__file__).resolve().parents[1] / "models"
+        print("=" * 78)
+        print("下载源             = ModelScope 魔搭（国内镜像，实测 28.6 MB/s）")
+        print(f"待下载模型         = {list(targets.values())}")
+        print(f"目标目录           = {dest_root}")
+        print(f"单文件重试次数      = {args.retries}   超时 = {args.timeout}s")
+        print(f"开始时间           = {time.strftime('%Y-%m-%d %H:%M:%S')}")
+        print("=" * 78, flush=True)
+
+        results = []
+        overall = time.perf_counter()
+        for name, repo_id in targets.items():
+            results.append(download_repo_modelscope(name, repo_id, dest_root, args))
+
+        print("=" * 78)
+        print(f"全部结束，总耗时 {time.perf_counter() - overall:.1f}s")
+        all_ok = True
+        for res in results:
+            status = "完整" if res["ok"] else f"未完成（缺 {len(res['failed'])} 个文件）"
+            total = sum(s for _, _, s in res["files"])
+            print(f"  {res['repo']:<28} {status:<24} 已就绪 {len(res['files'])} 个文件 / {_fmt(total)}")
+            all_ok = all_ok and res["ok"]
+        print("=" * 78)
+        return 0 if all_ok else 1
+
+    # ---------------- HF 源（hf-mirror，慢） ----------------
     print("=" * 78)
     print(f"HF_ENDPOINT        = {os.environ.get('HF_ENDPOINT')}")
     print(f"HF_HUB_DISABLE_XET = {os.environ.get('HF_HUB_DISABLE_XET')}")

@@ -28,7 +28,7 @@ class BGEM3Embedder:
 
     def __init__(self, model_name: str | None = None) -> None:
         settings = get_settings()
-        self.model_name: str = model_name or settings.embedding_model
+        self.model_name: str = model_name or settings.embedding_model_path
         self._model: Any = None
         self._load_lock = threading.Lock()
         self._load_error: str | None = None
@@ -56,6 +56,13 @@ class BGEM3Embedder:
                 return
             settings = get_settings()
             started = time.perf_counter()
+            # 每次加载前重新解析路径：单例可能在模型就绪前就被创建过，
+            # 若不刷新，self.model_name 会永久停留在旧的 repo id 上
+            resolved = settings.embedding_model_path
+            if resolved != self.model_name:
+                logger.info("嵌入模型路径已刷新: {} -> {}", self.model_name, resolved)
+                self.model_name = resolved
+                self._load_error = None
             # 必须在导入 FlagEmbedding/huggingface_hub 之前把 HF_ENDPOINT 写进环境变量
             apply_runtime_env()
             # 预检本地缓存：缺文件就立刻抛 ModelNotReadyError -> HTTP 503，
