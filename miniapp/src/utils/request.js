@@ -5,10 +5,16 @@
  * 但实现不同：小程序没有 axios，用 uni.request；没有 localStorage，用 uni.getStorageSync。
  */
 
-// 开发期直连本机 Java 服务。
-// 注意：微信开发者工具里必须勾选「不校验合法域名」，真机预览需要把服务暴露到公网
-// 或使用内网穿透；上线前换成 https 域名并在小程序后台配置 request 合法域名。
-const BASE_URL = 'http://127.0.0.1:8080'
+// 后端地址（全端唯一入口：chat.vue 等页面统一从这里 import，不要各写各的）。
+//
+// ⚠️ 为什么不能写 127.0.0.1：真机调试/真机预览时，127.0.0.1 是**手机自己的回环地址**，
+// 手机访问不到你电脑上的服务 —— 必须写电脑的**局域网 IP**（ipconfig 里的 IPv4），
+// 且手机与电脑连同一个 Wi-Fi。工具里的模拟器用这个地址也能通（本机可达自己的局域网 IP）。
+// 网络环境变化（换 Wi-Fi / DHCP 续租）后 IP 可能变，记得同步这里；
+// 要开放到公网时，这里换 https 域名并在小程序后台配 request 合法域名。
+//
+// 本机当前：192.168.1.23（WLAN，2026-10-10）
+export const BASE_URL = 'http://192.168.1.23:8080'
 
 const ACCESS_KEY = 'sa_access_token'
 const REFRESH_KEY = 'sa_refresh_token'

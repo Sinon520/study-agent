@@ -51,7 +51,7 @@
 </template>
 
 <script>
-import { getToken } from '@/utils/request'
+import { getToken, BASE_URL } from '@/utils/request'
 
 /**
  * 手写 UTF-8 解码：部分小程序运行环境没有 TextDecoder，
@@ -187,7 +187,9 @@ export default {
       this.streaming = true
 
       const token = getToken()
-      const url = 'http://127.0.0.1:8080/chat/ask'
+      // 统一用 utils/request.js 的 BASE_URL（局域网 IP）：
+      // 真机上 127.0.0.1 是手机自己的回环地址，连不上电脑
+      const url = `${BASE_URL}/chat/ask`
       const header = {
         'Content-Type': 'application/json',
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
