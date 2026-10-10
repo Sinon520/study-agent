@@ -1,0 +1,41 @@
+# ---- Java ----
+server-java/target/
+*.class
+*.jar
+!server-java/.mvn/wrapper/maven-wrapper.jar
+
+# ---- Python ----
+server-ai/.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+server-ai/models/
+server-ai/data/*.db
+server-ai/data/milvus*.db
+
+# ---- Node ----
+node_modules/
+web-pc/dist/
+miniapp/dist/
+miniapp/unpackage/
+*.local
+
+# ---- 密钥与本地配置 ----
+.env
+.env.*
+!.env.example
+*.log
+logs/
+
+# ---- 上传文件与本地数据 ----
+uploads/
+server-ai/uploads/
+data/
+
+# ---- IDE / OS ----
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
