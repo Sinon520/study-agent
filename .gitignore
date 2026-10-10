@@ -28,6 +28,9 @@ miniapp/unpackage/
 *.log
 logs/
 
+# 本地执行计划（含 API Key 对照信息，按文件内约定不入库）
+执行计划.md
+
 # ---- 上传文件与本地数据 ----
 uploads/
 server-ai/uploads/

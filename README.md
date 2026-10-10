@@ -1,6 +1,6 @@
 # 备考学习 Agent 系统（study-agent）
 
-> 面向考研 / 考公人群的个性化学习 Agent 系统。
+> 面向考研 / 考公人群的个性化学习 Agent 系统。  
 > Java 做业务工程化，Python 做 AI 能力，双栈分工明确。
 
 ---
@@ -21,17 +21,17 @@
 
 ### 技术栈
 
-| 层 | 技术 | 说明 |
-|----|------|------|
-| 业务服务 | Java 21 + Spring Boot 3 + MyBatis-Plus | 认证鉴权、CRUD、事务、消息生产/消费 |
-| AI 服务 | Python 3.13 + FastAPI + LangChain / LangGraph | RAG 检索增强、Agent 编排、流式输出 |
-| 向量库 | Milvus（Milvus Lite 本地文件模式） | 免 Docker，个人机器友好 |
-| 嵌入 / 重排 | BGE-M3 + BGE-Reranker-v2-m3（本地 CPU） | 零 API 成本 |
-| 生成模型 | 阿里云百炼 `qwen3.7-flash` | OpenAI 兼容协议，SSE 流式，含思考模式 |
-| 存储 | MySQL 8 / Redis | 业务数据 + 会话上下文与 token 缓存 |
-| 消息 | RocketMQ 5.5 | 错题归类 / 报告生成 / 微信推送三类异步任务 |
-| PC 端 | Vue 3 + Vite + Element Plus + Pinia + ECharts | 计划 / 问答 / 错题 / 进度 / 报告 |
-| 小程序 | UniApp（Vue3 语法） | 今日计划、错题列表、我的、简化问答 |
+| 层       | 技术                                            | 说明                       |
+| ------- | --------------------------------------------- | ------------------------ |
+| 业务服务    | Java 21 + Spring Boot 3 + MyBatis-Plus        | 认证鉴权、CRUD、事务、消息生产/消费     |
+| AI 服务   | Python 3.13 + FastAPI + LangChain / LangGraph | RAG 检索增强、Agent 编排、流式输出   |
+| 向量库     | Milvus（Milvus Lite 本地文件模式）                    | 免 Docker，个人机器友好          |
+| 嵌入 / 重排 | BGE-M3 + BGE-Reranker-v2-m3（本地 CPU）           | 零 API 成本                 |
+| 生成模型    | 阿里云百炼 `qwen3.7-flash`                         | OpenAI 兼容协议，SSE 流式，含思考模式 |
+| 存储      | MySQL 8 / Redis                               | 业务数据 + 会话上下文与 token 缓存   |
+| 消息      | RocketMQ 5.5                                  | 错题归类 / 报告生成 / 微信推送三类异步任务 |
+| PC 端    | Vue 3 + Vite + Element Plus + Pinia + ECharts | 计划 / 问答 / 错题 / 进度 / 报告   |
+| 小程序     | UniApp（Vue3 语法）                               | 今日计划、错题列表、我的、简化问答        |
 
 ### 为什么是双栈
 
@@ -104,15 +104,15 @@ sequenceDiagram
 
 ### 0. 环境要求
 
-| 组件 | 版本 | 本机路径（示例） |
-|------|------|-----------------|
-| JDK | 21 | `D:\jdk-21\jdk-21.0.11` |
-| Maven | 3.9+ | `D:\maven\apache-maven-3.9.9` |
-| Python | 3.13 | 受管解释器（见 `docs/环境说明.md`） |
-| MySQL | 8.0 | 服务名 `MySQL80`，root/123456 |
-| Redis | 8.x | 6379，无密码 |
-| RocketMQ | 5.5 | `D:\rocketmq-all-5.5.0-bin-release` |
-| Node.js | 20+ | 前端与小程序构建 |
+| 组件       | 版本   | 本机路径（示例）                            |
+| -------- | ---- | ----------------------------------- |
+| JDK      | 21   | `D:\jdk-21\jdk-21.0.11`             |
+| Maven    | 3.9+ | `D:\maven\apache-maven-3.9.9`       |
+| Python   | 3.13 | 受管解释器（见 `docs/环境说明.md`）             |
+| MySQL    | 8.0  | 服务名 `MySQL80`，root/123456           |
+| Redis    | 8.x  | 6379，无密码                            |
+| RocketMQ | 5.5  | `D:\rocketmq-all-5.5.0-bin-release` |
+| Node.js  | 20+  | 前端与小程序构建                            |
 
 ### 1. 初始化数据库
 
@@ -129,7 +129,20 @@ copy .env.example .env
 # 编辑 .env，填入 DASHSCOPE_API_KEY（阿里云百炼控制台获取）
 ```
 
-### 3. 一键启动
+### 3. 下载本地模型（仅首次，约 3 分钟）
+
+```powershell
+cd server-ai
+# 国内走 ModelScope（实测 28.6 MB/s，两个模型共 4.4GB 约 3 分钟）
+.\.venv\Scripts\python.exe scripts\download_models.py
+# 自检：应输出 1024 维向量与 3 条重排分数
+.\.venv\Scripts\python.exe scripts\check_models.py --strict
+```
+
+> BGE-M3 / BGE-Reranker-v2-m3 下载到 `server-ai/models/`（已 gitignore），
+> 服务启动后按「本地目录优先」自动加载。hf 镜像作为备选源见 `server-ai/README.md`。
+
+### 4. 一键启动
 
 ```bat
 scripts\start-all.bat
@@ -147,64 +160,69 @@ cd server-ai
 .venv\Scripts\python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-### 4. 验证
+### 5. 验证
 
-| 服务 | 地址 |
-|------|------|
-| Java 健康检查 | http://127.0.0.1:8080/health |
-| Java 接口文档 | http://127.0.0.1:8080/swagger-ui.html |
-| Python 健康检查 | http://127.0.0.1:8000/health |
-| Python 接口文档 | http://127.0.0.1:8000/docs |
-| PC 前端 | http://127.0.0.1:5173 |
+| 服务          | 地址                                      |
+| ----------- | --------------------------------------- |
+| Java 健康检查   | <http://127.0.0.1:8080/health>          |
+| Java 接口文档   | <http://127.0.0.1:8080/swagger-ui.html> |
+| Python 健康检查 | <http://127.0.0.1:8000/health>          |
+| Python 接口文档 | <http://127.0.0.1:8000/docs>            |
+| PC 前端       | <http://127.0.0.1:5173>                 |
 
 演示账号：`demo` / `123456`
 
 ## 五、文档索引
 
-| 文档 | 内容 |
-|------|------|
-| [表设计.md](docs/表设计.md) | 13 张表结构、ER 图、索引设计与依据 |
-| [架构.md](docs/架构.md) | 双栈拆分理由、模块职责、traceId 四段式贯穿、可替换点 |
-| [环境说明.md](docs/环境说明.md) | 本机中间件与工具链、端口、常见问题 |
-| [踩坑记录.md](docs/踩坑记录.md) | 16 条真实踩过的坑（含 LangChain 丢 reasoning_content、模型下载挂死、Excel 运行时炸、Bean 循环依赖等） |
-| [第1周验收报告.md](docs/第1周验收报告.md) | 地基周验收：40 项自动化检查 |
-| [第2周验收报告.md](docs/第2周验收报告.md) | 业务闭环周验收：74 项自动化检查 |
+| 文档                            | 内容                                                                       |
+| ----------------------------- | ------------------------------------------------------------------------ |
+| [表设计.md](docs/表设计.md)         | 13 张表结构、ER 图、索引设计与依据                                                     |
+| [架构.md](docs/架构.md)           | 双栈拆分理由、模块职责、traceId 四段式贯穿、可替换点                                           |
+| [环境说明.md](docs/环境说明.md)       | 本机中间件与工具链、端口、常见问题                                                        |
+| [踩坑记录.md](docs/踩坑记录.md)       | 22 条真实踩过的坑（模型下载挂死/换 ModelScope、向量相似度误判、**双写竞态**、长计划超时/分片生成、LangChain 丢 reasoning_content、Excel 运行时炸、Bean 循环依赖等） |
+| [第1周验收报告.md](docs/第1周验收报告.md) | 地基周验收：40 项自动化检查                                                          |
+| [第2周验收报告.md](docs/第2周验收报告.md) | 业务闭环周验收：74 项自动化检查                                                        |
+| [第3周验收报告.md](docs/第3周验收报告.md) | AI 能力层验收：RAG 端到端 31 项 + 联调加固 32 项                                           |
+| [当前进度.md](docs/当前进度.md)       | 进度快照：Git 进度、验收状态、本机启动方式、面试素材                                             |
 
 ### 验收脚本
 
 ```bash
 # 需要先启动后端（java -jar server-java/target/server-java-1.0.0-SNAPSHOT.jar）
-python scripts/verify_week1_auth.py    # 认证全流程，40 项
-python scripts/verify_week2.py         # 计划/错题/进度/通知 + 越权防护，74 项
+python scripts/verify_week1_auth.py       # 认证全流程，40 项
+python scripts/verify_week2.py            # 计划/错题/进度/通知 + 越权防护，74 项
+python scripts/verify_week3_rag.py        # RAG 端到端（上传→入库→流式问答→引用溯源），31 项
+python scripts/verify_week3_hardening.py  # 并发 / 断连 / 长文档 / 空检索，32 项
+python scripts/smoke_week3.py             # 内部接口安全 / Agent 落库 / 问答降级路径
+python scripts/test_kb_upload.py          # 资料上传边界（非法类型 / 越权 / 失败态可读）
 ```
-
 
 ## 六、进度
 
-| 周 | 主题 | 状态 |
-|----|------|------|
-| 第 0 周 | 环境确认与仓库初始化 | ✅ 完成 |
-| 第 1 周 | 中间件 + 表设计 + 双工程骨架 + 登录 | ✅ 完成（40/40 验收通过，tag `week1`） |
-| 第 2 周 | 业务 CRUD 闭环 + PC / 小程序主页面 | ✅ 完成（74/74 验收通过，tag `week2`） |
-| 第 3 周 | AI 能力层（RAG + 规划 Agent + SSE） | ⬜ 未开始 |
-| 第 4 周 | RocketMQ 异步 + 微信订阅消息 | ⬜ 未开始 |
-| 第 5 周 | 可视化收尾 + 性能优化 | ⬜ 未开始 |
-| 第 6 周 | 部署 + 文档 + 面试准备 | ⬜ 未开始 |
+| 周     | 主题                           | 状态                           |
+| ----- | ---------------------------- | ---------------------------- |
+| 第 0 周 | 环境确认与仓库初始化                   | ✅ 完成                         |
+| 第 1 周 | 中间件 + 表设计 + 双工程骨架 + 登录       | ✅ 完成（40/40 验收通过，tag `week1`） |
+| 第 2 周 | 业务 CRUD 闭环 + PC / 小程序主页面     | ✅ 完成（74/74 验收通过，tag `week2`） |
+| 第 3 周 | AI 能力层（RAG + 规划 Agent + SSE） | ✅ 完成（RAG 31/31 + 加固 32/32 验收通过，tag `week3`） |
+| 第 4 周 | RocketMQ 异步 + 微信订阅消息         | ⬜ 未开始                        |
+| 第 5 周 | 可视化收尾 + 性能优化                 | ⬜ 未开始                        |
+| 第 6 周 | 部署 + 文档 + 面试准备               | ⬜ 未开始                        |
 
 ### 当前可演示的能力
 
-| 能力 | 入口 | 状态 |
-|------|------|------|
-| 注册 / 登录 / 刷新令牌 / 退出 | http://127.0.0.1:5173/login | ✅ |
-| 小程序登录（mock openid） | `POST /auth/wx-login` | ✅ |
-| 学习计划 CRUD + 自动拆任务 | PC「学习计划」 | ✅ |
-| 任务勾选 → 学习时长累计 | PC「今日概览」/「学习计划」 | ✅ |
-| 错题 CRUD + 标签筛选 + 批量 + 导出 Excel | PC「错题本」 | ✅ |
-| 进度统计 4 张图 | PC「学习进度」 | ✅ |
-| 站内通知 | PC「消息通知」 | ✅（数据源在第 4 周） |
-| AI 问答（RAG 流式 + 引用） | PC「AI 问答」/ 小程序「问答」 | 🚧 第 3 周接入 |
-| AI 生成计划 | PC「学习计划」按钮 | 🚧 第 3 周接入 |
-
+| 能力                             | 入口                            | 状态           |
+| ------------------------------ | ----------------------------- | ------------ |
+| 注册 / 登录 / 刷新令牌 / 退出            | <http://127.0.0.1:5173/login> | ✅            |
+| 小程序登录（mock openid）             | `POST /auth/wx-login`         | ✅            |
+| 学习计划 CRUD + 自动拆任务              | PC「学习计划」                      | ✅            |
+| 任务勾选 → 学习时长累计                  | PC「今日概览」/「学习计划」               | ✅            |
+| 错题 CRUD + 标签筛选 + 批量 + 导出 Excel | PC「错题本」                       | ✅            |
+| 进度统计 4 张图                      | PC「学习进度」                      | ✅            |
+| 站内通知                           | PC「消息通知」                      | ✅（数据源在第 4 周） |
+| AI 问答（RAG 流式 + 引用溯源）             | PC「AI 问答」/ 小程序「问答」            | ✅ PC 已联调；小程序流式待真机验证 |
+| 资料库上传（解析状态轮询 / 失败重试 / 删除）        | PC「AI 问答」左侧资料库抽屉             | ✅            |
+| AI 生成计划（LangGraph 规划 Agent）     | PC「学习计划」→「AI 生成计划」           | ✅            |
 
 ## 七、安全说明
 
