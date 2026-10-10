@@ -45,8 +45,8 @@
       </view>
     </view>
 
-    <!-- 版本标记：用于确认开发者工具加载的是不是最新构建（v2 = 分块接收 + 整包兜底） -->
-    <view class="build-tag">v2 · 分块接收</view>
+    <!-- 版本/通道标记：v3 = 流式解码器 + 分块计数；用于确认构建版本与本次实际通道 -->
+    <view class="build-tag">v3 · {{ recvInfo || '就绪' }}</view>
   </view>
 </template>
 
@@ -92,6 +92,59 @@ function utf8Decode(bytes) {
   return out
 }
 
+/**
+ * 跨分片的流式 UTF-8 解码器（真机部分 iOS/安卓环境没有 TextDecoder，但流式体验不能丢）。
+ *
+ * 难点：一个汉字占 3 个字节，很可能被切在两个分片的边界上 ——
+ * 每片单独解码会把边界处的汉字解成乱码。做法：解码前先扫描尾部，
+ * 把"不完整的 UTF-8 序列"留到下一片拼接后再解，完整部分立即输出。
+ */
+function createStreamingUtf8Decoder() {
+  let pending = new Uint8Array(0)
+  return {
+    decode(chunk) {
+      const chunkBytes = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk)
+      let bytes = chunkBytes
+      if (pending.length) {
+        bytes = new Uint8Array(pending.length + chunkBytes.length)
+        bytes.set(pending)
+        bytes.set(chunkBytes, pending.length)
+        pending = new Uint8Array(0)
+      }
+      // 从尾部回看：跳过续字节（10xxxxxx），找到最后一个序列的起始字节，
+      // 若序列不完整（剩余字节不够）就把尾巴留给下一片
+      let end = bytes.length
+      let i = bytes.length - 1
+      let continuation = 0
+      while (i >= 0 && (bytes[i] & 0xc0) === 0x80 && continuation < 3) {
+        i -= 1
+        continuation += 1
+      }
+      if (i >= 0) {
+        const b = bytes[i]
+        let need = 1
+        if (b >= 0xf0) {
+          need = 4
+        } else if (b >= 0xe0) {
+          need = 3
+        } else if (b >= 0xc0) {
+          need = 2
+        }
+        if (bytes.length - i < need) {
+          end = i
+        }
+      }
+      pending = bytes.slice(end)
+      return utf8Decode(bytes.slice(0, end))
+    },
+    flush() {
+      const rest = pending
+      pending = new Uint8Array(0)
+      return rest.length ? utf8Decode(rest) : ''
+    },
+  }
+}
+
 export default {
   data() {
     return {
@@ -99,13 +152,14 @@ export default {
       messages: [],
       streaming: false,
       scrollTop: 0,
+      recvInfo: '',
     }
   },
   methods: {
     /**
      * 流式问答。
      *
-     * 三个实测出来的关键点（都踩过）：
+     * 四个实测出来的关键点（都踩过）：
      * 1. **uni.request 不支持 enableChunked** —— @dcloudio 框架包里根本没有这个参数
      *    （全量 grep 验证过：传进去会被忽略，返回的 task 上也没有 onChunkReceived），
      *    分块数据永远收不到、还不报错 → 答案静默丢失。所以 MP-WEIXIN 下必须
@@ -113,7 +167,12 @@ export default {
      * 2. **必须有"整包兜底"**：即使分块不可用（老基础库 / 其它端），
      *    success 回调里也要能拿完整响应体走同一套帧解析，退化为一次性显示 ——
      *    否则就会出现"发了问题但气泡里什么都没有"。
-     * 3. TextDecoder 在部分小程序环境不存在，准备了手写 UTF-8 解码兜底。
+     * 3. **TextDecoder 在部分真机环境不存在**（iOS/安卓实测缺失），
+     *    准备了跨分片的流式 UTF-8 解码器（汉字被切在分片边界也不会乱码）。
+     * 4. **开发者工具模拟器会把分块缓冲到最后一次性回调**（微信平台已知行为，
+     *    见官方社区"onChunkReceived 真机和开发者工具触发次数不一样"），
+     *    所以"模拟器里一次性显示"属正常；真机（真机调试）才会逐块到达。
+     *    页面底部的「分块×N / 整包」标记用于确认本次实际走通的通道。
      */
     async onSend() {
       const question = this.input.trim()
@@ -134,11 +193,22 @@ export default {
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
       }
 
-      // 分块解码：优先 TextDecoder 流式解码；没有它就攒原始字节、结束时整体解码
-      const hasTextDecoder = typeof TextDecoder !== 'undefined'
-      const decoder = hasTextDecoder ? new TextDecoder('utf-8') : null
+      // 分块解码：优先 TextDecoder 流式解码；真机（部分 iOS/安卓）没有它，
+      // 退回自写的"跨分片 UTF-8 解码器"—— 保证真机上也是逐字流式，
+      // 而不是攒到最后一次性显示
+      let decodeChunk
+      let flushDecoder
+      if (typeof TextDecoder !== 'undefined') {
+        const textDecoder = new TextDecoder('utf-8')
+        decodeChunk = (bytes) => textDecoder.decode(bytes, { stream: true })
+        flushDecoder = () => textDecoder.decode()
+      } else {
+        const manualDecoder = createStreamingUtf8Decoder()
+        decodeChunk = (bytes) => manualDecoder.decode(bytes)
+        flushDecoder = () => manualDecoder.flush()
+      }
       let buffer = ''
-      const rawChunks = []
+      let chunkCount = 0
 
       const consumeFrames = () => {
         let index = buffer.indexOf('\n\n')
@@ -152,28 +222,29 @@ export default {
 
       const onChunk = (chunkData) => {
         if (!chunkData) return
+        chunkCount += 1
         try {
-          const bytes = new Uint8Array(chunkData)
-          if (decoder) {
-            buffer += decoder.decode(bytes, { stream: true })
-            consumeFrames()
-          } else {
-            rawChunks.push(bytes)
-          }
+          buffer += decodeChunk(new Uint8Array(chunkData))
+          consumeFrames()
         } catch (e) {
           // 单个分片解码异常不能中断整条流（宁可少一片，不能整条丢）
         }
         this.scrollToBottom()
       }
 
-      // 请求收尾（成功/失败都走这里）：处理分块残留；分块通道没拿到东西就用整包兜底
+      // 请求收尾（成功/失败都走这里）：先冲掉解码器残留；分块通道没拿到东西就用整包兜底
       const settle = (fallbackText) => {
-        if (decoder) {
-          buffer += decoder.decode()
-          consumeFrames()
+        try {
+          buffer += flushDecoder()
+        } catch (e) {
+          // 忽略：残留解码失败不影响已渲染内容
         }
+        consumeFrames()
+        // 记录本次实际走通的通道，显示在页面底部供验证：
+        // 分块×N = onChunkReceived 生效；"整包" = 走了 success 一次性兜底
+        this.recvInfo = chunkCount > 0 ? `分块×${chunkCount}` : '整包'
         if (!reply.content && !reply.reasoning && !reply.error) {
-          const text = fallbackText || (rawChunks.length ? this.decodeBytes(rawChunks) : '')
+          const text = fallbackText || ''
           if (text && text.trim()) {
             this.parseSseText(text, reply)
           }
@@ -271,21 +342,6 @@ export default {
       body.split('\n\n').forEach((frame) => {
         if (frame.trim()) this.handleFrame(frame, reply)
       })
-    },
-
-    /** 合并若干 Uint8Array 后整体 UTF-8 解码（无 TextDecoder 环境的兜底） */
-    decodeBytes(chunks) {
-      let total = 0
-      chunks.forEach((c) => {
-        total += c.length
-      })
-      const merged = new Uint8Array(total)
-      let offset = 0
-      chunks.forEach((c) => {
-        merged.set(c, offset)
-        offset += c.length
-      })
-      return utf8Decode(merged)
     },
 
     decodeAny(data) {
