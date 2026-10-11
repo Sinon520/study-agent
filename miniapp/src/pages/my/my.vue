@@ -70,9 +70,9 @@
         <text>我的资料</text>
         <text class="cell-arrow">›</text>
       </view>
-      <view class="cell" @tap="showTip('订阅消息授权将在第 4 周接入')">
+      <view class="cell" @tap="requestSubscribe">
         <text>学习提醒设置</text>
-        <text class="cell-arrow">›</text>
+        <text class="cell-value">{{ subscribeSummary }}</text>
       </view>
     </view>
 
@@ -92,14 +92,67 @@ export default {
       overview: {},
       unread: 0,
       notices: [],
+      subscribes: [],
     }
+  },
+  computed: {
+    subscribeSummary() {
+      const total = this.subscribes.length
+      if (!total) return '未授权 ›'
+      const opened = this.subscribes.filter((item) => item.authorized).length
+      return `${opened}/${total} 已开启 ›`
+    },
   },
   onShow() {
     this.user = getUserInfo() || {}
     this.loadOverview()
     this.loadNotices()
+    this.loadSubscribes()
   },
   methods: {
+    /**
+     * 发起订阅消息授权并把结果上报服务端。
+     *
+     * 微信语义：用户点一次「同意」= 我们获得一次发送额度（templateId: 'accept'）。
+     * 所以这里**每次都把最新结果回传**，由服务端累加额度；拒绝只更新状态，
+     * 不动已有额度（用户已经给的额度不会因为一次拒绝而消失）。
+     */
+    async requestSubscribe() {
+      let templates = {}
+      try {
+        templates = (await api.subscribeTemplates()) || {}
+      } catch (e) {
+        this.showTip('获取订阅模板失败')
+        return
+      }
+
+      const ids = Object.values(templates).filter(Boolean)
+      if (!ids.length) {
+        this.showTip('服务端还没有配置订阅模板')
+        return
+      }
+
+      uni.requestSubscribeMessage({
+        tmplIds: ids,
+        success: async (res) => {
+          const items = Object.entries(templates).map(([templateKey, templateId]) => ({
+            templateKey,
+            templateId,
+            status: res[templateId] || 'unknown',
+          }))
+          try {
+            await api.subscribeReport({ items })
+            this.loadSubscribes()
+            uni.showToast({ title: '订阅状态已更新', icon: 'none' })
+          } catch (e) {
+            // request 层已提示
+          }
+        },
+        fail: (err) => {
+          this.showTip('授权失败：' + (err.errMsg || '未知错误'))
+        },
+      })
+    },
     async loadOverview() {
       try {
         this.overview = (await api.progressOverview(30)) || {}
@@ -254,6 +307,11 @@ export default {
 .cell-arrow {
   color: #c0c4cc;
   font-size: 34rpx;
+}
+
+.cell-value {
+  color: #909399;
+  font-size: 26rpx;
 }
 
 .logout {

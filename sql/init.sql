@@ -289,6 +289,48 @@ CREATE TABLE `chat_message` (
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT = '问答消息表';
 
 -- ---------------------------------------------------------------------
+-- 14. wx_subscribe  微信订阅消息授权表（第 4 周 Day 25）
+--     WeChat 语义：一次订阅授权 = 一次发送额度（accept_count）；
+--     发送成功扣减，扣到 0 后需再次授权。拒绝不扣存量额度。
+-- ---------------------------------------------------------------------
+DROP TABLE IF EXISTS `wx_subscribe`;
+CREATE TABLE `wx_subscribe` (
+  `id`             bigint      NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `user_id`        bigint      NOT NULL                COMMENT '用户ID',
+  `template_key`   varchar(32) NOT NULL                COMMENT '模板场景：reminder/review/report',
+  `template_id`    varchar(64) DEFAULT NULL            COMMENT '微信模板ID（用户授权时小程序传入）',
+  `status`         tinyint     NOT NULL DEFAULT 0      COMMENT '最近一次授权结果：1同意 0拒绝/失效',
+  `accept_count`   int         NOT NULL DEFAULT 0      COMMENT '剩余可发送次数（一次订阅一次发送，发送成功扣减）',
+  `authorize_time` datetime    DEFAULT NULL            COMMENT '最近一次授权时间',
+  `create_time`    datetime    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `update_time`    datetime    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_user_template` (`user_id`, `template_key`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT = '微信订阅消息授权表';
+
+-- ---------------------------------------------------------------------
+-- 15. wx_push_log  微信推送日志表（第 4 周 Day 25）
+--     每次推送尝试一条记录：success / failed（含微信错误码）/ skipped（终态跳过）。
+--     没有真实 AppID 期间 mock=1（模拟发送成功），上真值后同一张表审计真实结果。
+-- ---------------------------------------------------------------------
+DROP TABLE IF EXISTS `wx_push_log`;
+CREATE TABLE `wx_push_log` (
+  `id`           bigint       NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `user_id`      bigint       NOT NULL                COMMENT '用户ID',
+  `template_key` varchar(32)  NOT NULL                COMMENT '模板场景：reminder/review/report',
+  `template_id`  varchar(64)  DEFAULT NULL            COMMENT '微信模板ID',
+  `page`         varchar(128) DEFAULT NULL            COMMENT '点击跳转页面',
+  `status`       varchar(16)  NOT NULL                COMMENT 'success=发送成功 / failed=发送失败 / skipped=未发送（终态跳过）',
+  `mock`         tinyint      NOT NULL DEFAULT 0      COMMENT '是否 mock 发送（无真实 AppID 期间为 1）',
+  `error_code`   varchar(32)  DEFAULT NULL            COMMENT '微信错误码或跳过原因',
+  `error_msg`    varchar(255) DEFAULT NULL            COMMENT '错误/跳过说明',
+  `content`      varchar(512) DEFAULT NULL            COMMENT '消息内容摘要（便于人工核对）',
+  `create_time`  datetime     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  PRIMARY KEY (`id`),
+  KEY `idx_user_time` (`user_id`, `create_time`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT = '微信推送日志表';
+
+-- ---------------------------------------------------------------------
 -- 初始化数据：默认演示账号
 --   密码明文：123456
 --   BCrypt 密文（由 BCryptPasswordEncoder(strength=10) 生成，

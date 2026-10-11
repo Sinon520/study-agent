@@ -235,6 +235,14 @@ export const api = {
   progressRecent: (days = 7) => request({ url: `/progress/recent?days=${days}` }),
   progressOverview: (days = 30) => request({ url: `/progress/overview?days=${days}` }),
 
+  // ---------------------------------------------------------- 微信订阅消息
+  // 模板清单（场景 key → 模板 ID），小程序端据此发起授权
+  subscribeTemplates: () => request({ url: '/wx/templates', silent: true }),
+  // 上报授权结果：一次订阅 = 一次发送额度，同意则额度 +1
+  subscribeReport: (data) => request({ url: '/wx/subscribe', method: 'POST', data }),
+  // 我的订阅状态
+  subscribeMine: () => request({ url: '/wx/subscribe', silent: true }),
+
   // ---------------------------------------------------------- 通知
   noticePage: (params) => {
     const qs = Object.entries(params || {})

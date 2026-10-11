@@ -3,7 +3,7 @@ package com.studyagent.mq;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.studyagent.common.util.TraceIdConstants;
-import com.studyagent.config.ReportProperties;
+import com.studyagent.config.WxTemplateKeys;
 import com.studyagent.entity.NoticeMessage;
 import com.studyagent.entity.ReviewReport;
 import com.studyagent.mq.message.ReportGenerateMessage;
@@ -58,7 +58,6 @@ public class ReportGenerateConsumer implements RocketMQListener<ReportGenerateMe
     private final ReviewReportService reviewReportService;
     private final NoticeMessageService noticeMessageService;
     private final MessagePublisher publisher;
-    private final ReportProperties reportProperties;
     private final ObjectMapper objectMapper;
 
     @Override
@@ -154,16 +153,29 @@ public class ReportGenerateConsumer implements RocketMQListener<ReportGenerateMe
         return true;
     }
 
-    /** 发微信订阅消息（Day 25~26 接消费者；当前发送失败只告警，不影响主链路） */
+    /**
+     * 发微信订阅消息。
+     *
+     * <p>消息里只带**业务场景 key**（{@code report}），不带模板 ID ——
+     * 模板 ID 属于配置（小程序后台申请、可换），由 {@code WxPushConsumer}
+     * 按 {@code wx.templates.*} 解析成当前模板。这样换模板不用处理历史消息，
+     * 也避免占位 ID 散落在业务代码里。</p>
+     *
+     * <p>推送是**尽力而为**的外部依赖：发送失败只告警，不影响已落库的报告与站内通知。</p>
+     */
     private void sendWxPush(Long userId, LocalDate start, LocalDate end, Long reportId, Map<String, Object> stats) {
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("thing1", Map.of("value", "本周学习复盘报告"));
         data.put("thing2", Map.of("value",
                 "学习 " + value(stats.get("totalMinutes")) + " 分钟 · 完成率 " + value(stats.get("completionRate")) + "%"));
         data.put("time3", Map.of("value", start + " ~ " + end));
+
         try {
+            // 小程序端目前没有独立的报告页，点击后落进度页
+            // TODO: 小程序补上复盘报告页后，把 page 换成 pages/report/report
             publisher.send(MqTopics.WX_PUSH, new WxPushMessage(
-                    userId, reportProperties.getWxTemplateId(), data, MessagePublisher.currentTraceId()));
+                    userId, WxTemplateKeys.REPORT, null, "pages/progress/progress", data,
+                    MessagePublisher.currentTraceId()));
         } catch (Exception e) {
             log.warn("报告微信推送消息发送失败（不影响报告与站内通知）userId={} reportId={}: {}",
                     userId, reportId, e.getMessage());

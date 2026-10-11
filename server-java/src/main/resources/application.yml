@@ -131,8 +131,26 @@ jwt:
 
 # ==================== 微信小程序（第 4 周换真实值） ====================
 wx:
-  appid: wx_test_appid
-  secret: wx_test_secret
+  appid: ${WX_APPID:wx_test_appid}
+  secret: ${WX_SECRET:wx_test_secret}
+  code2session-url: ${WX_CODE2SESSION_URL:https://api.weixin.qq.com/sns/jscode2session}
+  # mock 模式：本地没有真实 AppID/模板，订阅消息走"模拟发送"并记录 mock=1
+  mock-enabled: true
+  # 三个订阅场景的模板 ID（在小程序后台申请后经环境变量注入）
+  templates:
+    reminder: ${WX_TEMPLATE_REMINDER:wx-template-reminder-placeholder}
+    review: ${WX_TEMPLATE_REVIEW:wx-template-review-placeholder}
+    report: ${WX_TEMPLATE_REPORT:wx-template-report-placeholder}
+  # 定时推送（Spring cron：秒 分 时 日 月 周）
+  reminder-cron: "${WX_REMINDER_CRON:0 0 8 * * *}"
+  review-cron: "${WX_REVIEW_CRON:0 0 20 * * *}"
+  push-scheduler-enabled: true
+  # "未掌握"错题达到多少道才推复习提醒
+  review-wrong-threshold: 3
+  subscribe-send-url: ${WX_SUBSCRIBE_SEND_URL:https://api.weixin.qq.com/cgi-bin/message/subscribe/send}
+  access-token-url: ${WX_ACCESS_TOKEN_URL:https://api.weixin.qq.com/cgi-bin/token}
+  # 正式版 formal / 体验版 trial / 开发版 developer
+  miniprogram-state: ${WX_MINIPROGRAM_STATE:trial}
 
 # ==================== 复盘报告（Day 24） ====================
 report:
