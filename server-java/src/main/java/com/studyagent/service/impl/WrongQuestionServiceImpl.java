@@ -3,7 +3,10 @@ package com.studyagent.service.impl;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.studyagent.common.Result;
+import com.studyagent.common.cache.CacheKeys;
+import com.studyagent.common.cache.RedisCacheHelper;
 import com.studyagent.common.exception.BizException;
 import com.studyagent.entity.WrongQuestion;
 import com.studyagent.entity.WrongQuestionTag;
@@ -53,6 +56,12 @@ import java.util.stream.Collectors;
  *   <li><b>导出有上限</b>：Excel 导出不分页，但必须设上限（{@link #EXPORT_LIMIT}），
  *       否则用户筛出全库错题会让 JVM 直接 OOM。</li>
  * </ol>
+ *
+ * <h3>标签统计缓存（Day 27）</h3>
+ * <p>{@code listTags} 是 LEFT JOIN + GROUP BY 的聚合查询，筛选栏每次打开错题页都要调。
+ * 标签只有"增删错题 / 改标签 / AI 打标"三种变化途径，全部在写方法里删缓存；
+ * {@code batchUpdateMastery} 只改掌握度、不动标签关系 —— 不做失效（注释里写明原因，
+ * 防止后人"顺手补一刀"把不必要的失效越加越多）。</p>
  */
 @Slf4j
 @Service
@@ -69,6 +78,7 @@ public class WrongQuestionServiceImpl extends ServiceImpl<WrongQuestionMapper, W
     private final WrongQuestionTagRelService tagRelService;
     private final WrongQuestionTagMapper tagMapper;
     private final MessagePublisher messagePublisher;
+    private final RedisCacheHelper cacheHelper;
 
     // ------------------------------------------------------------------ 查询
 
@@ -144,15 +154,20 @@ public class WrongQuestionServiceImpl extends ServiceImpl<WrongQuestionMapper, W
 
     @Override
     public List<String> listTags(Long userId) {
-        List<Map<String, Object>> rows = tagMapper.listTagsWithCount(userId);
-        List<String> names = new ArrayList<>();
-        for (Map<String, Object> row : rows) {
-            Object name = row.get("name");
-            if (name != null) {
-                names.add(String.valueOf(name));
-            }
-        }
-        return names;
+        // Cache Aside：结果只是标签名列表（不含分页参数），天然适合整体缓存
+        return cacheHelper.getOrLoad(CacheKeys.wrongTags(userId),
+                new TypeReference<List<String>>() {
+                }, CacheKeys.WRONG_TAGS_TTL, () -> {
+                    List<Map<String, Object>> rows = tagMapper.listTagsWithCount(userId);
+                    List<String> names = new ArrayList<>();
+                    for (Map<String, Object> row : rows) {
+                        Object name = row.get("name");
+                        if (name != null) {
+                            names.add(String.valueOf(name));
+                        }
+                    }
+                    return names;
+                });
     }
 
     @Override
@@ -188,6 +203,7 @@ public class WrongQuestionServiceImpl extends ServiceImpl<WrongQuestionMapper, W
         save(question);
 
         replaceTags(userId, question.getId(), request.getTags());
+        cacheHelper.evictAfterCommit(CacheKeys.wrongTags(userId));
         log.info("新增错题 id={} userId={} subject={}", question.getId(), userId, question.getSubject());
 
         // 异步归类（AI 打标签）：事务提交后再发消息，详见 publishClassifyAfterCommit 的注释
@@ -207,6 +223,9 @@ public class WrongQuestionServiceImpl extends ServiceImpl<WrongQuestionMapper, W
         if (request.getTags() != null) {
             replaceTags(userId, id, request.getTags());
         }
+        // 无脑删（即使本次没动标签）：错题修改是低频操作，宁可多删一次缓存，
+        // 也不为省一次失效去维护"哪些字段会影响标签"的脆弱判断
+        cacheHelper.evictAfterCommit(CacheKeys.wrongTags(userId));
         log.info("修改错题 id={} userId={}", id, userId);
         return getDetail(userId, id);
     }
@@ -220,6 +239,7 @@ public class WrongQuestionServiceImpl extends ServiceImpl<WrongQuestionMapper, W
         tagRelService.remove(Wrappers.<WrongQuestionTagRel>lambdaQuery()
                 .eq(WrongQuestionTagRel::getWrongQuestionId, id));
         removeById(id);
+        cacheHelper.evictAfterCommit(CacheKeys.wrongTags(userId));
         log.info("删除错题 id={} userId={}", id, userId);
     }
 
@@ -233,6 +253,7 @@ public class WrongQuestionServiceImpl extends ServiceImpl<WrongQuestionMapper, W
         tagRelService.remove(Wrappers.<WrongQuestionTagRel>lambdaQuery()
                 .in(WrongQuestionTagRel::getWrongQuestionId, owned));
         removeByIds(owned);
+        cacheHelper.evictAfterCommit(CacheKeys.wrongTags(userId));
         log.info("批量删除错题 userId={} 请求={} 实际={}", userId, ids.size(), owned.size());
         return owned.size();
     }
@@ -359,8 +380,12 @@ public class WrongQuestionServiceImpl extends ServiceImpl<WrongQuestionMapper, W
         } catch (DuplicateKeyException e) {
             // 并发（如重复消费的两条消息同时进来）：对方先插成功，本次忽略即可
             log.warn("标签关系并发重复，已忽略 questionId={}", questionId);
+            // 对方插入成功同样改变了标签统计 —— 这次请求也要负责删缓存
+            cacheHelper.evictAfterCommit(CacheKeys.wrongTags(userId));
             return 0;
         }
+        // AI 打标（归类消费者）也会走到这里：新标签/新关系出现，标签统计缓存必须失效
+        cacheHelper.evictAfterCommit(CacheKeys.wrongTags(userId));
         return rels.size();
     }
 

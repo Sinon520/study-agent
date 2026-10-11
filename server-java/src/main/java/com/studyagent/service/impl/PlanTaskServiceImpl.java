@@ -3,6 +3,8 @@ package com.studyagent.service.impl;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.studyagent.common.Result;
+import com.studyagent.common.cache.CacheKeys;
+import com.studyagent.common.cache.RedisCacheHelper;
 import com.studyagent.common.exception.BizException;
 import com.studyagent.entity.PlanTask;
 import com.studyagent.entity.StudyPlan;
@@ -42,6 +44,11 @@ import java.util.List;
  * Spring Boot 2.6+ 默认直接启动失败。校验计划归属只需要一次按主键查询，
  * 用 Mapper 完全够用，同时把循环依赖从设计上消除（而不是靠
  * {@code spring.main.allow-circular-references=true} 掩盖）。</p>
+ *
+ * <h3>任务写操作要连带失效计划详情缓存（Day 27）</h3>
+ * <p>计划详情里有 taskTotal / taskDone / progress / totalMinutes 等统计字段，
+ * 它们来自任务表 —— 任务的任何增删改都会让"计划详情"的展示随之变化。
+ * 这个依赖不在同一个文件里，最容易漏；四个写方法（增/改/删/状态）都要删缓存。</p>
  */
 @Slf4j
 @Service
@@ -55,6 +62,7 @@ public class PlanTaskServiceImpl extends ServiceImpl<PlanTaskMapper, PlanTask> i
 
     private final StudyRecordService studyRecordService;
     private final StudyPlanMapper studyPlanMapper;
+    private final RedisCacheHelper cacheHelper;
 
     // ------------------------------------------------------------------ 查询
 
@@ -141,6 +149,7 @@ public class PlanTaskServiceImpl extends ServiceImpl<PlanTaskMapper, PlanTask> i
         task.setStatus(STATUS_TODO);
         task.setSort(request.getSort() == null ? 0 : request.getSort());
         save(task);
+        cacheHelper.evictAfterCommit(CacheKeys.planDetail(userId, plan.getId()));
 
         log.info("新增任务 taskId={} planId={} userId={}", task.getId(), plan.getId(), userId);
         return task;
@@ -150,6 +159,7 @@ public class PlanTaskServiceImpl extends ServiceImpl<PlanTaskMapper, PlanTask> i
     @Transactional(rollbackFor = Exception.class)
     public PlanTask updateTask(Long userId, Long taskId, PlanTaskRequest request) {
         PlanTask task = requireOwnedTask(userId, taskId);
+        Long originalPlanId = task.getPlanId();
 
         // 允许把任务挪到自己的另一个计划下，但同样要校验目标计划归属
         if (request.getPlanId() != null && !request.getPlanId().equals(task.getPlanId())) {
@@ -167,6 +177,11 @@ public class PlanTaskServiceImpl extends ServiceImpl<PlanTaskMapper, PlanTask> i
             task.setSort(request.getSort());
         }
         updateById(task);
+        // 任务可能被挪走：原计划与新计划的详情缓存都要删，否则两个计划的统计都会对不上
+        cacheHelper.evictAfterCommit(CacheKeys.planDetail(userId, originalPlanId));
+        if (!originalPlanId.equals(task.getPlanId())) {
+            cacheHelper.evictAfterCommit(CacheKeys.planDetail(userId, task.getPlanId()));
+        }
         log.info("修改任务 taskId={} userId={}", taskId, userId);
         return task;
     }
@@ -174,10 +189,11 @@ public class PlanTaskServiceImpl extends ServiceImpl<PlanTaskMapper, PlanTask> i
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void deleteTask(Long userId, Long taskId) {
-        requireOwnedTask(userId, taskId);
+        PlanTask task = requireOwnedTask(userId, taskId);
         // 任务被删掉时，它产生的学习记录也应移除，否则进度统计会凭空多出时长
         studyRecordService.remove(Wrappers.<StudyRecord>lambdaQuery().eq(StudyRecord::getPlanTaskId, taskId));
         removeById(taskId);
+        cacheHelper.evictAfterCommit(CacheKeys.planDetail(userId, task.getPlanId()));
         log.info("删除任务 taskId={} userId={}（含其学习记录）", taskId, userId);
     }
 
@@ -204,6 +220,7 @@ public class PlanTaskServiceImpl extends ServiceImpl<PlanTaskMapper, PlanTask> i
             task.setFinishTime(null);
         }
         updateById(task);
+        cacheHelper.evictAfterCommit(CacheKeys.planDetail(userId, task.getPlanId()));
 
         log.info("任务状态变更 taskId={} {} -> {} userId={}", task.getId(), previous, target, userId);
         return task;

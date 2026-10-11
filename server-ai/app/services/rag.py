@@ -282,7 +282,7 @@ def _build_no_material_prompt(question: str) -> str:
 
 
 def _load_history(session_id: int | None) -> list[dict]:
-    """从 Java 读最近 N 轮会话历史（Redis 里存的），失败则当作没有历史。"""
+    """从 Java 读最近 N 轮会话历史（最终来源是 chat_message 表，Java 是唯一出口），失败则当作没有历史。"""
     if not session_id:
         return []
     try:

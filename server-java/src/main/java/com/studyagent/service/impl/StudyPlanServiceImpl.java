@@ -5,6 +5,8 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.studyagent.common.Result;
+import com.studyagent.common.cache.CacheKeys;
+import com.studyagent.common.cache.RedisCacheHelper;
 import com.studyagent.common.exception.BizException;
 import com.studyagent.entity.PlanTask;
 import com.studyagent.entity.StudyPlan;
@@ -34,6 +36,13 @@ import java.util.Map;
 
 /**
  * 学习计划 业务实现。
+ *
+ * <h3>计划详情缓存（Day 27）</h3>
+ * <p>{@code getPlanDetail} 每次要查计划行 + 该计划全部任务做内存聚合。
+ * 计划页/详情抽屉会反复打开同一份数据，读多写少，适合 Cache Aside：
+ * 读 → 缓存（key 含 userId，命中即等于归属校验通过）；写 → 事务提交后删缓存。
+ * 注意"任务"也是计划详情的一部分（taskDone/totalMinutes 等统计字段），
+ * 所以任务的增删改在 {@code PlanTaskServiceImpl} 里同样要删这份缓存。</p>
  */
 @Slf4j
 @Service
@@ -48,6 +57,7 @@ public class StudyPlanServiceImpl extends ServiceImpl<StudyPlanMapper, StudyPlan
     private final PlanTaskService planTaskService;
     private final PlanTaskGenerator planTaskGenerator;
     private final PythonClient pythonClient;
+    private final RedisCacheHelper cacheHelper;
 
     // ------------------------------------------------------------------ 查询
 
@@ -77,10 +87,15 @@ public class StudyPlanServiceImpl extends ServiceImpl<StudyPlanMapper, StudyPlan
 
     @Override
     public StudyPlanVO getPlanDetail(Long userId, Long planId) {
-        StudyPlan plan = requireOwnedPlan(userId, planId);
-        StudyPlanVO vo = StudyPlanVO.from(plan);
-        fillStats(vo, loadTaskStats(userId, List.of(planId)).get(planId));
-        return vo;
+        // Cache Aside：key 含 userId，命中即等价于"归属校验已通过"（详见 CacheKeys 注释）。
+        // miss 时 loader 里先做归属校验再查库 —— 越权请求走 loader 直接抛 403，不会产生缓存。
+        return cacheHelper.getOrLoad(CacheKeys.planDetail(userId, planId),
+                StudyPlanVO.class, CacheKeys.PLAN_DETAIL_TTL, () -> {
+                    StudyPlan plan = requireOwnedPlan(userId, planId);
+                    StudyPlanVO vo = StudyPlanVO.from(plan);
+                    fillStats(vo, loadTaskStats(userId, List.of(planId)).get(planId));
+                    return vo;
+                });
     }
 
     // ------------------------------------------------------------------ 写入
@@ -132,6 +147,7 @@ public class StudyPlanServiceImpl extends ServiceImpl<StudyPlanMapper, StudyPlan
         plan.setStartDate(start);
         plan.setDailyMinutes(request.getDailyMinutes());
         updateById(plan);
+        cacheHelper.evictAfterCommit(CacheKeys.planDetail(userId, planId));
 
         log.info("修改学习计划 planId={} userId={}（不重新生成任务，避免冲掉已勾选进度）", planId, userId);
 
@@ -147,6 +163,7 @@ public class StudyPlanServiceImpl extends ServiceImpl<StudyPlanMapper, StudyPlan
         // 先删任务再删计划：两个都是逻辑删除，保证列表页不会出现"孤儿任务"
         planTaskService.remove(Wrappers.<PlanTask>lambdaQuery().eq(PlanTask::getPlanId, planId));
         removeById(planId);
+        cacheHelper.evictAfterCommit(CacheKeys.planDetail(userId, planId));
         log.info("删除学习计划 planId={} userId={}（含其下任务，逻辑删）", planId, userId);
     }
 
@@ -158,6 +175,7 @@ public class StudyPlanServiceImpl extends ServiceImpl<StudyPlanMapper, StudyPlan
         StudyPlan plan = requireOwnedPlan(userId, planId);
         plan.setStatus(status);
         updateById(plan);
+        cacheHelper.evictAfterCommit(CacheKeys.planDetail(userId, planId));
         log.info("变更计划状态 planId={} status={}", planId, status);
     }
 
