@@ -183,6 +183,7 @@ cd server-ai
 | [第1周验收报告.md](docs/第1周验收报告.md) | 地基周验收：40 项自动化检查                                                          |
 | [第2周验收报告.md](docs/第2周验收报告.md) | 业务闭环周验收：74 项自动化检查                                                        |
 | [第3周验收报告.md](docs/第3周验收报告.md) | AI 能力层验收：RAG 端到端 31 项 + 联调加固 32 项                                           |
+| [第4周验收报告.md](docs/第4周验收报告.md) | 异步与缓存周验收：MQ 三链路 + 订阅消息 + 缓存，全量 10 脚本 297 项                              |
 | [当前进度.md](docs/当前进度.md)       | 进度快照：Git 进度、验收状态、本机启动方式、面试素材                                             |
 
 ### 验收脚本
@@ -197,6 +198,7 @@ python scripts/smoke_week3.py             # 内部接口安全 / Agent 落库 / 
 python scripts/smoke_week4_mq.py          # RocketMQ 收发环回 + 错题异步归类端到端
 python scripts/verify_week4_report.py     # 复盘报告链路（生成/幂等/通知/越权），29 项
 python scripts/verify_week4_wxpush.py     # 微信订阅消息（授权记账/额度/推送状态机/隔离），19 项
+python scripts/verify_week4_cache.py     # Redis 缓存（回填/写失效/TTL/越权不走缓存），26 项
 python scripts/test_kb_upload.py          # 资料上传边界（非法类型 / 越权 / 失败态可读）
 ```
 
@@ -208,7 +210,7 @@ python scripts/test_kb_upload.py          # 资料上传边界（非法类型 / 
 | 第 1 周 | 中间件 + 表设计 + 双工程骨架 + 登录       | ✅ 完成（40/40 验收通过，tag `week1`） |
 | 第 2 周 | 业务 CRUD 闭环 + PC / 小程序主页面     | ✅ 完成（74/74 验收通过，tag `week2`） |
 | 第 3 周 | AI 能力层（RAG + 规划 Agent + SSE） | ✅ 完成（RAG 31/31 + 加固 32/32 验收通过，tag `week3`） |
-| 第 4 周 | RocketMQ 异步 + 微信订阅消息         | 🚧 进行中（Day 22~26 已完成：MQ 基建 + 错题打标 + 复盘报告 + 订阅消息，Day 27 缓存加固待做） |
+| 第 4 周 | RocketMQ 异步 + 微信订阅消息         | ✅ 完成（全量 10 脚本 297 项验收通过，tag `week4`） |
 | 第 5 周 | 可视化收尾 + 性能优化                 | ⬜ 未开始                        |
 | 第 6 周 | 部署 + 文档 + 面试准备               | ⬜ 未开始                        |
 
