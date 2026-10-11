@@ -9,7 +9,7 @@ export const planApi = {
     return request.get('/plan/page', { params })
   },
 
-  /** 创建计划（会自动均摊生成任务） */
+  /** 创建计划（tasks 为用户自定义的任务清单，至少一条） */
   create(data) {
     return request.post('/plan', data)
   },

@@ -111,22 +111,58 @@
         </el-form-item>
         <el-form-item label="每日时长" prop="dailyMinutes">
           <el-input-number v-model="form.dailyMinutes" :min="10" :max="1440" :step="10" />
-          <span class="form-hint">分钟，会按科目数均摊到每天的每条任务</span>
+          <span class="form-hint">分钟，作为计划的目标档位</span>
         </el-form-item>
-        <el-form-item label="科目" prop="subjects">
-          <el-select
-            v-model="subjectList"
-            multiple
-            filterable
-            allow-create
-            default-first-option
-            placeholder="选择或输入科目，可多选"
-            style="width: 100%"
-          >
-            <el-option v-for="s in subjectOptions" :key="s" :label="s" :value="s" />
-          </el-select>
-          <div class="form-hint">
-            只在新创建计划时用于生成任务；编辑计划不会重新生成（保护已勾选的进度）
+        <!-- 任务清单：手动建计划由用户自己输入（旧的"套模板均摊生成"已移除） -->
+        <el-form-item v-if="!form.id" label="任务清单" required>
+          <div class="task-editor">
+            <div v-for="(item, idx) in taskDraft" :key="idx" class="task-editor-row">
+              <div class="task-editor-line">
+                <el-date-picker
+                  v-model="item.taskDate"
+                  type="date"
+                  size="small"
+                  value-format="YYYY-MM-DD"
+                  :disabled-date="disabledTaskDate"
+                  style="width: 126px"
+                />
+                <el-select
+                  v-model="item.subject"
+                  size="small"
+                  filterable
+                  allow-create
+                  default-first-option
+                  clearable
+                  placeholder="科目"
+                  style="width: 106px"
+                >
+                  <el-option v-for="s in subjectOptions" :key="s" :label="s" :value="s" />
+                </el-select>
+                <el-input-number
+                  v-model="item.estimatedMinutes"
+                  size="small"
+                  :min="1"
+                  :max="1440"
+                  :step="10"
+                  controls-position="right"
+                  style="width: 110px"
+                />
+                <el-button link type="danger" :icon="'Delete'" @click="removeDraftTask(idx)" />
+              </div>
+              <el-input
+                v-model="item.title"
+                size="small"
+                placeholder="任务内容，如：背 50 个核心词 + 精读 1 篇真题阅读"
+                maxlength="128"
+              />
+            </div>
+            <div class="task-editor-footer">
+              <el-button size="small" :icon="'Plus'" @click="addDraftTask">添加任务</el-button>
+              <span class="form-hint">
+                共 {{ taskDraft.length }} 条（上限 100），日期需在计划起止范围内；
+                想要自动规划可改用「AI 生成计划」
+              </span>
+            </div>
           </div>
         </el-form-item>
       </el-form>
@@ -134,7 +170,7 @@
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
         <el-button type="primary" :loading="submitting" @click="onSubmit">
-          {{ form.id ? '保存' : '创建并生成任务' }}
+          {{ form.id ? '保存' : '创建计划' }}
         </el-button>
       </template>
     </el-dialog>
@@ -221,6 +257,7 @@
           <el-option label="完成" value="完成" />
           <el-option label="跳过" value="跳过" />
         </el-select>
+        <el-button type="primary" size="small" :icon="'Plus'" @click="openAddTask">添加任务</el-button>
       </div>
 
       <el-skeleton v-if="taskLoading" :rows="6" animated />
@@ -256,6 +293,50 @@
         </div>
       </div>
     </el-drawer>
+
+    <!-- ------------------------- 添加任务（抽屉内） --------------- -->
+    <el-dialog v-model="addTaskVisible" title="添加任务" width="520px">
+      <el-form label-width="80px">
+        <el-form-item label="任务日期" required>
+          <el-date-picker
+            v-model="addTaskForm.taskDate"
+            type="date"
+            value-format="YYYY-MM-DD"
+            :disabled-date="disabledAddTaskDate"
+            style="width: 100%"
+          />
+        </el-form-item>
+        <el-form-item label="科目">
+          <el-select
+            v-model="addTaskForm.subject"
+            filterable
+            allow-create
+            default-first-option
+            clearable
+            placeholder="可选"
+            style="width: 100%"
+          >
+            <el-option v-for="s in subjectOptions" :key="s" :label="s" :value="s" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="任务内容" required>
+          <el-input
+            v-model="addTaskForm.title"
+            placeholder="如：背 50 个核心词 + 精读 1 篇真题阅读"
+            maxlength="128"
+            show-word-limit
+          />
+        </el-form-item>
+        <el-form-item label="预计时长">
+          <el-input-number v-model="addTaskForm.estimatedMinutes" :min="1" :max="1440" :step="10" />
+          <span class="form-hint">分钟</span>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="addTaskVisible = false">取消</el-button>
+        <el-button type="primary" :loading="addTaskSubmitting" @click="submitAddTask">添加</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -286,7 +367,88 @@ const form = reactive({
   targetDate: '',
   dailyMinutes: 120,
 })
-const subjectList = ref(['英语'])
+// 建计划：用户自定义任务清单（旧的"科目均摊生成模板任务"已移除）
+const taskDraft = ref([])
+
+function makeDraftTask() {
+  return {
+    taskDate: form.startDate || new Date().toISOString().slice(0, 10),
+    subject: '',
+    title: '',
+    estimatedMinutes: 60,
+  }
+}
+
+function addDraftTask() {
+  if (taskDraft.value.length >= 100) {
+    ElMessage.warning('单次最多 100 条任务，更多任务可创建后在任务抽屉里补充')
+    return
+  }
+  taskDraft.value.push(makeDraftTask())
+}
+
+function removeDraftTask(idx) {
+  taskDraft.value.splice(idx, 1)
+}
+
+/** 任务日期限制在计划的起止范围内（按本地自然日比对，避免时区偏移误禁） */
+function outsidePlanRange(day, start, end) {
+  const t = day.getTime()
+  if (start && t < new Date(start + 'T00:00:00').getTime()) return true
+  if (end && t > new Date(end + 'T23:59:59').getTime()) return true
+  return false
+}
+
+function disabledTaskDate(day) {
+  return outsidePlanRange(day, form.startDate, form.targetDate)
+}
+
+function disabledAddTaskDate(day) {
+  return outsidePlanRange(day, currentPlan.value?.startDate, currentPlan.value?.targetDate)
+}
+
+// 添加任务弹窗（任务抽屉内）
+const addTaskVisible = ref(false)
+const addTaskSubmitting = ref(false)
+const addTaskForm = reactive({ taskDate: '', subject: '', title: '', estimatedMinutes: 60 })
+
+function openAddTask() {
+  Object.assign(addTaskForm, {
+    taskDate: new Date().toISOString().slice(0, 10),
+    subject: '',
+    title: '',
+    estimatedMinutes: 60,
+  })
+  addTaskVisible.value = true
+}
+
+async function submitAddTask() {
+  if (!addTaskForm.title.trim()) {
+    ElMessage.warning('请填写任务内容')
+    return
+  }
+  if (!addTaskForm.taskDate) {
+    ElMessage.warning('请选择任务日期')
+    return
+  }
+  addTaskSubmitting.value = true
+  try {
+    await planApi.addTask({
+      planId: currentPlan.value?.id,
+      taskDate: addTaskForm.taskDate,
+      title: addTaskForm.title.trim(),
+      subject: addTaskForm.subject || undefined,
+      estimatedMinutes: addTaskForm.estimatedMinutes,
+    })
+    ElMessage.success('任务已添加')
+    addTaskVisible.value = false
+    await Promise.all([loadTasks(), loadPlans()])
+  } catch (e) {
+    // 拦截器已提示
+  } finally {
+    addTaskSubmitting.value = false
+  }
+}
 
 // AI 生成计划弹窗
 const agentVisible = ref(false)
@@ -365,7 +527,7 @@ function openCreate() {
     targetDate: '',
     dailyMinutes: 120,
   })
-  subjectList.value = ['英语']
+  taskDraft.value = [makeDraftTask()]
   dialogVisible.value = true
 }
 
@@ -378,7 +540,6 @@ function openEdit(plan) {
     targetDate: plan.targetDate,
     dailyMinutes: plan.dailyMinutes,
   })
-  subjectList.value = []
   dialogVisible.value = true
 }
 
@@ -388,13 +549,39 @@ async function onSubmit() {
   } catch {
     return
   }
+  const creating = !form.id
+
+  let taskItems
+  if (creating) {
+    if (!taskDraft.value.length) {
+      ElMessage.warning('请至少添加一条任务')
+      return
+    }
+    if (taskDraft.value.some((t) => !t.title || !t.title.trim())) {
+      ElMessage.warning('有任务还没填内容，补全后再创建')
+      return
+    }
+    if (taskDraft.value.some((t) => !t.taskDate)) {
+      ElMessage.warning('有任务还没选日期，补全后再创建')
+      return
+    }
+    taskItems = taskDraft.value.map((t) => ({
+      taskDate: t.taskDate,
+      title: t.title.trim(),
+      subject: t.subject || undefined,
+      estimatedMinutes: t.estimatedMinutes,
+    }))
+  }
+
   const payload = {
     title: form.title,
     examType: form.examType,
     startDate: form.startDate || undefined,
     targetDate: form.targetDate,
     dailyMinutes: form.dailyMinutes,
-    subjects: subjectList.value.join(','),
+  }
+  if (creating) {
+    payload.tasks = taskItems
   }
 
   submitting.value = true
@@ -404,7 +591,7 @@ async function onSubmit() {
       ElMessage.success('计划已更新')
     } else {
       const created = await planApi.create(payload)
-      ElMessage.success(`创建成功，已生成 ${created?.taskTotal ?? 0} 条任务`)
+      ElMessage.success(`创建成功，共 ${created?.taskTotal ?? 0} 条任务`)
     }
     dialogVisible.value = false
     await loadPlans()
@@ -628,6 +815,34 @@ onMounted(loadPlans)
 
 .agent-tip {
   margin-bottom: 16px;
+}
+
+.task-editor {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.task-editor-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+}
+
+.task-editor-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.task-editor-footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .drawer-toolbar {

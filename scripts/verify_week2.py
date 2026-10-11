@@ -4,7 +4,7 @@
 第 2 周验收脚本：计划 / 错题 / 进度 / 通知 四模块 CRUD 闭环
 
 覆盖：
-  A. 计划模块：创建（自动生成任务）、分页、详情、修改、状态变更、删除
+  A. 计划模块：创建（用户自定义任务清单，含空清单/越界日期负例）、分页、详情、修改、状态变更、删除
   B. 分页边界：pageNum=0 / 负数 / 超大 pageSize / 超大页码 都不炸
   C. 任务模块：列表、今日任务、新增、修改、勾选完成（联动 study_record）、取消完成
   D. 进度模块：dashboard / recent / overview，验证时长与完成率真的变了
@@ -142,14 +142,25 @@ def main() -> int:
     target = today + timedelta(days=13)          # 14 天计划
 
     # ================================================================ A
-    step("A. 计划模块 CRUD")
+    step("A. 计划模块 CRUD（任务由用户自定义输入）")
+
+    # 自定义任务清单：14 天 × 2 科 = 28 条
+    # （2026-10-11 起建计划不再"按科目均摊套模板生成"，改为用户逐条输入）
+    task_items = []
+    for d in range(14):
+        day = (today + timedelta(days=d)).isoformat()
+        task_items.append({"taskDate": day, "title": f"英语：背 30 个核心词（第 {d + 1} 天）",
+                           "subject": "英语", "estimatedMinutes": 60})
+        task_items.append({"taskDate": day, "title": f"政治：学习 1 个章节（第 {d + 1} 天）",
+                           "subject": "政治", "estimatedMinutes": 60})
+
     create = api("POST", "/plan", {
         "title": "第2周验收计划",
         "examType": "考研",
         "targetDate": target.isoformat(),
         "startDate": today.isoformat(),
         "dailyMinutes": 120,
-        "subjects": "英语,政治",
+        "tasks": task_items,
     }, token=token_a)
     cj = create["json"] or {}
     plan = cj.get("data") or {}
@@ -157,12 +168,31 @@ def main() -> int:
     check(cj.get("code") == 200 and plan_id, "创建计划成功",
           f"code={cj.get('code')} msg={cj.get('msg')} planId={plan_id}")
 
-    # 14 天 × 2 科目 = 28 条任务
-    check(plan.get("taskTotal") == 28, "按「目标日期 + 每日时长」均摊生成任务",
-          f"taskTotal={plan.get('taskTotal')}（期望 28 = 14 天 × 2 科）")
+    check(plan.get("taskTotal") == len(task_items),
+          "任务按用户自定义清单落库（28 条）",
+          f"taskTotal={plan.get('taskTotal')}（期望 28）")
     check(plan.get("source") == "手动", "source 标记为手动", f"source={plan.get('source')}")
     check(plan.get("status") == "进行中", "初始状态为进行中", f"status={plan.get('status')}")
     check(plan.get("daysLeft") is not None, "返回距考试天数", f"daysLeft={plan.get('daysLeft')}")
+
+    # 负例 1：不带任务清单 → 拒绝（建计划必须由用户定义任务）
+    no_tasks = api("POST", "/plan", {
+        "title": "无任务计划", "examType": "考研",
+        "targetDate": target.isoformat(), "startDate": today.isoformat(), "dailyMinutes": 60,
+    }, token=token_a)
+    check((no_tasks["json"] or {}).get("code") == 400,
+          "任务清单为空被拒绝",
+          f"code={(no_tasks['json'] or {}).get('code')} msg={(no_tasks['json'] or {}).get('msg')}")
+
+    # 负例 2：任务日期超出计划范围 → 拒绝
+    out_range = api("POST", "/plan", {
+        "title": "越界任务计划", "examType": "考研",
+        "targetDate": target.isoformat(), "startDate": today.isoformat(), "dailyMinutes": 60,
+        "tasks": [{"taskDate": (target + timedelta(days=3)).isoformat(), "title": "考试之后的任务"}],
+    }, token=token_a)
+    check((out_range["json"] or {}).get("code") == 400,
+          "任务日期超出计划范围被拒绝",
+          f"code={(out_range['json'] or {}).get('code')} msg={(out_range['json'] or {}).get('msg')}")
 
     page = api("GET", "/plan/page", token=token_a, query={"pageNum": 1, "pageSize": 10})
     pj = (page["json"] or {}).get("data") or {}
@@ -178,7 +208,7 @@ def main() -> int:
     }, token=token_a)
     uj = (upd["json"] or {}).get("data") or {}
     check(uj.get("title") == "第2周验收计划（改名）", "修改计划成功", f"title={uj.get('title')}")
-    check(uj.get("taskTotal") == 28, "修改计划不重新生成任务（保护已勾选进度）",
+    check(uj.get("taskTotal") == 28, "修改计划不涉及任务（保护已勾选进度）",
           f"taskTotal={uj.get('taskTotal')}")
 
     # ================================================================ B
@@ -207,6 +237,10 @@ def main() -> int:
                 query={"planId": plan_id, "startDate": today.isoformat(), "endDate": target.isoformat()})
     tlist = (tasks["json"] or {}).get("data") or []
     check(len(tlist) == 28, "任务列表返回 28 条", f"实际 {len(tlist)} 条")
+    first_task_title = tlist[0].get("title") if tlist else None
+    check(bool(tlist) and first_task_title == task_items[0]["title"],
+          "任务内容是用户输入的原样内容（不再套模板）",
+          f"tlist[0].title={first_task_title!r}")
 
     today_tasks = api("GET", "/plan/task/today", token=token_a)
     tj = (today_tasks["json"] or {}).get("data") or {}

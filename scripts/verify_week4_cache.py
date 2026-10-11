@@ -219,6 +219,8 @@ def main() -> int:
         _s, body = call(java, "POST", "/plan", {
             "title": "缓存验收计划", "examType": "考研", "targetDate": target,
             "startDate": today, "dailyMinutes": 60,
+            "tasks": [{"taskDate": today, "title": "缓存验收任务",
+                       "subject": "综合", "estimatedMinutes": 30}],
         }, token=jwt)
         plan = (body or {}).get("data") or {}
         created_plan = True

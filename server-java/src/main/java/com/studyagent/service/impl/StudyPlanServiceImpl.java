@@ -17,7 +17,6 @@ import com.studyagent.model.dto.StudyPlanCreateRequest;
 import com.studyagent.model.vo.AgentPlanGenerateVO;
 import com.studyagent.model.vo.PageResult;
 import com.studyagent.model.vo.StudyPlanVO;
-import com.studyagent.service.PlanTaskGenerator;
 import com.studyagent.service.PlanTaskService;
 import com.studyagent.service.PythonClient;
 import com.studyagent.service.StudyPlanService;
@@ -37,6 +36,11 @@ import java.util.Map;
 /**
  * 学习计划 业务实现。
  *
+ * <h3>手动创建 = 用户自定义任务清单（2026-10-11 调整）</h3>
+ * <p>创建计划时任务由用户输入（{@code StudyPlanCreateRequest.tasks}），逐条校验后落库；
+ * 历史上"按科目均摊生成模板任务"的做法已移除（生成器 {@code PlanTaskGenerator} 一并删除）。
+ * 需要"智能定制"的任务请走「AI 生成计划」（{@link #generateByAgent}，LLM 链路）。</p>
+ *
  * <h3>计划详情缓存（Day 27）</h3>
  * <p>{@code getPlanDetail} 每次要查计划行 + 该计划全部任务做内存聚合。
  * 计划页/详情抽屉会反复打开同一份数据，读多写少，适合 Cache Aside：
@@ -54,8 +58,10 @@ public class StudyPlanServiceImpl extends ServiceImpl<StudyPlanMapper, StudyPlan
     private static final String STATUS_ABANDONED = "已放弃";
     private static final List<String> VALID_STATUS = List.of(STATUS_ONGOING, STATUS_FINISHED, STATUS_ABANDONED);
 
+    /** 自定义任务未填预计时长时的默认值（分钟） */
+    private static final int DEFAULT_TASK_MINUTES = 60;
+
     private final PlanTaskService planTaskService;
-    private final PlanTaskGenerator planTaskGenerator;
     private final PythonClient pythonClient;
     private final RedisCacheHelper cacheHelper;
 
@@ -108,6 +114,10 @@ public class StudyPlanServiceImpl extends ServiceImpl<StudyPlanMapper, StudyPlan
             throw new BizException(Result.CODE_BAD_REQUEST,
                     "目标考试日期（" + request.getTargetDate() + "）不能早于开始日期（" + start + "）");
         }
+        // 创建计划必须带任务清单（DTO 上不能标 @NotEmpty —— 这个 DTO 编辑也在用，编辑不带任务）
+        if (request.getTasks() == null || request.getTasks().isEmpty()) {
+            throw new BizException(Result.CODE_BAD_REQUEST, "请至少添加一条任务：手动建计划需要自己输入任务清单");
+        }
 
         StudyPlan plan = new StudyPlan();
         plan.setUserId(userId);
@@ -120,11 +130,32 @@ public class StudyPlanServiceImpl extends ServiceImpl<StudyPlanMapper, StudyPlan
         plan.setSource("手动");
         save(plan);
 
-        // 计划落库拿到 id 之后才生成任务：任务表需要 plan_id
-        List<PlanTask> tasks = planTaskGenerator.generateBySpread(plan, parseSubjects(request.getSubjects()));
+        // 任务由用户自己输入（不再套模板均摊生成，详见 DTO 注释）。
+        // 逐条校验日期落在计划范围内 —— 脏数据（任务日期超出计划）会让"今日任务/进度统计"口径失真
+        List<PlanTask> tasks = new ArrayList<>(request.getTasks().size());
+        int sort = 0;
+        for (StudyPlanCreateRequest.TaskItem item : request.getTasks()) {
+            LocalDate taskDate = item.getTaskDate() != null ? item.getTaskDate() : start;
+            if (taskDate.isBefore(start) || taskDate.isAfter(request.getTargetDate())) {
+                throw new BizException(Result.CODE_BAD_REQUEST,
+                        "任务「" + item.getTitle() + "」的日期 " + taskDate
+                                + " 不在计划范围（" + start + " ~ " + request.getTargetDate() + "）内");
+            }
+            PlanTask task = new PlanTask();
+            task.setPlanId(plan.getId());
+            task.setUserId(userId);
+            task.setTaskDate(taskDate);
+            task.setTitle(item.getTitle().trim());
+            task.setSubject(StringUtils.hasText(item.getSubject()) ? item.getSubject().trim() : null);
+            task.setEstimatedMinutes(item.getEstimatedMinutes() == null
+                    ? DEFAULT_TASK_MINUTES : item.getEstimatedMinutes());
+            task.setStatus("待办");
+            task.setSort(sort++);
+            tasks.add(task);
+        }
         planTaskService.saveBatch(tasks, 200);
 
-        log.info("创建学习计划 planId={} userId={} 自动生成任务 {} 条", plan.getId(), userId, tasks.size());
+        log.info("创建学习计划 planId={} userId={} 自定义任务 {} 条", plan.getId(), userId, tasks.size());
 
         StudyPlanVO vo = StudyPlanVO.from(plan);
         fillStats(vo, loadTaskStats(userId, List.of(plan.getId())).get(plan.getId()));
@@ -149,7 +180,7 @@ public class StudyPlanServiceImpl extends ServiceImpl<StudyPlanMapper, StudyPlan
         updateById(plan);
         cacheHelper.evictAfterCommit(CacheKeys.planDetail(userId, planId));
 
-        log.info("修改学习计划 planId={} userId={}（不重新生成任务，避免冲掉已勾选进度）", planId, userId);
+        log.info("修改学习计划 planId={} userId={}（不涉及任务，避免冲掉已勾选进度）", planId, userId);
 
         StudyPlanVO vo = StudyPlanVO.from(plan);
         fillStats(vo, loadTaskStats(userId, List.of(planId)).get(planId));

@@ -137,6 +137,7 @@ public class PlanTaskServiceImpl extends ServiceImpl<PlanTaskMapper, PlanTask> i
     public PlanTask addTask(Long userId, PlanTaskRequest request) {
         // 校验 planId 归属，防止往别人的计划里塞任务
         StudyPlan plan = requireOwnedPlan(userId, request.getPlanId());
+        validateTaskDate(plan, request.getTaskDate());
 
         PlanTask task = new PlanTask();
         task.setPlanId(plan.getId());
@@ -162,10 +163,14 @@ public class PlanTaskServiceImpl extends ServiceImpl<PlanTaskMapper, PlanTask> i
         Long originalPlanId = task.getPlanId();
 
         // 允许把任务挪到自己的另一个计划下，但同样要校验目标计划归属
+        StudyPlan targetPlan = studyPlanMapper.selectById(task.getPlanId());
         if (request.getPlanId() != null && !request.getPlanId().equals(task.getPlanId())) {
-            requireOwnedPlan(userId, request.getPlanId());
+            targetPlan = requireOwnedPlan(userId, request.getPlanId());
             task.setPlanId(request.getPlanId());
         }
+        // 任务日期必须落在所属计划范围内（口径与创建计划时一致）
+        validateTaskDate(targetPlan, request.getTaskDate());
+
         task.setTaskDate(request.getTaskDate());
         task.setTitle(request.getTitle().trim());
         task.setContent(request.getContent());
@@ -244,6 +249,23 @@ public class PlanTaskServiceImpl extends ServiceImpl<PlanTaskMapper, PlanTask> i
             throw new BizException(Result.CODE_FORBIDDEN, "无权操作该计划");
         }
         return plan;
+    }
+
+    /**
+     * 任务日期必须落在所属计划的起止范围内。
+     * <p>不回溯校验存量任务 —— 计划日期被编辑后，历史任务可能"越界"，
+     * 那是用户自己的选择；这里只拦新增/修改的入口。</p>
+     */
+    private void validateTaskDate(StudyPlan plan, LocalDate taskDate) {
+        if (plan == null || taskDate == null) {
+            return;
+        }
+        LocalDate start = plan.getStartDate();
+        LocalDate end = plan.getTargetDate();
+        if ((start != null && taskDate.isBefore(start)) || (end != null && taskDate.isAfter(end))) {
+            throw new BizException(Result.CODE_BAD_REQUEST,
+                    "任务日期 " + taskDate + " 不在计划范围（" + start + " ~ " + end + "）内");
+        }
     }
 
     private StudyRecord buildRecord(PlanTask task, PlanTaskStatusRequest request) {
