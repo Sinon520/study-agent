@@ -196,6 +196,7 @@ python scripts/verify_week3_hardening.py  # 并发 / 断连 / 长文档 / 空检
 python scripts/smoke_week3.py             # 内部接口安全 / Agent 落库 / 问答降级路径
 python scripts/smoke_week4_mq.py          # RocketMQ 收发环回 + 错题异步归类端到端
 python scripts/verify_week4_report.py     # 复盘报告链路（生成/幂等/通知/越权），29 项
+python scripts/verify_week4_wxpush.py     # 微信订阅消息（授权记账/额度/推送状态机/隔离），19 项
 python scripts/test_kb_upload.py          # 资料上传边界（非法类型 / 越权 / 失败态可读）
 ```
 
@@ -207,7 +208,7 @@ python scripts/test_kb_upload.py          # 资料上传边界（非法类型 / 
 | 第 1 周 | 中间件 + 表设计 + 双工程骨架 + 登录       | ✅ 完成（40/40 验收通过，tag `week1`） |
 | 第 2 周 | 业务 CRUD 闭环 + PC / 小程序主页面     | ✅ 完成（74/74 验收通过，tag `week2`） |
 | 第 3 周 | AI 能力层（RAG + 规划 Agent + SSE） | ✅ 完成（RAG 31/31 + 加固 32/32 验收通过，tag `week3`） |
-| 第 4 周 | RocketMQ 异步 + 微信订阅消息         | 🚧 进行中（Day 22~23 已完成：MQ 基建 + 错题自动打标跑通） |
+| 第 4 周 | RocketMQ 异步 + 微信订阅消息         | 🚧 进行中（Day 22~26 已完成：MQ 基建 + 错题打标 + 复盘报告 + 订阅消息，Day 27 缓存加固待做） |
 | 第 5 周 | 可视化收尾 + 性能优化                 | ⬜ 未开始                        |
 | 第 6 周 | 部署 + 文档 + 面试准备               | ⬜ 未开始                        |
 
@@ -222,6 +223,7 @@ python scripts/test_kb_upload.py          # 资料上传边界（非法类型 / 
 | 错题 CRUD + 标签筛选 + 批量 + 导出 Excel | PC「错题本」                       | ✅            |
 | 进度统计 4 张图                      | PC「学习进度」                      | ✅            |
 | 站内通知                           | PC「消息通知」                      | ✅（数据源在第 4 周） |
+| 微信订阅消息（授权记账 / 额度 / 推送状态机）   | 小程序「我的」→「学习提醒设置」           | ✅（mock 通道，access_token 缓存与扣额逻辑真实） |
 | AI 问答（RAG 流式 + 引用溯源）             | PC「AI 问答」/ 小程序「问答」            | ✅ PC 已联调；小程序流式待真机验证 |
 | 资料库上传（解析状态轮询 / 失败重试 / 删除）        | PC「AI 问答」左侧资料库抽屉             | ✅            |
 | AI 生成计划（LangGraph 规划 Agent）     | PC「学习计划」→「AI 生成计划」           | ✅            |
