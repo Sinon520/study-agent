@@ -42,3 +42,6 @@ data/
 *.iml
 .DS_Store
 Thumbs.db
+
+# ---- 工作台数据（WorkBuddy 会话与记忆，仅本地） ----
+.workbuddy/
